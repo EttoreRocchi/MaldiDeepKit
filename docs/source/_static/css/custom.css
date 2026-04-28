@@ -1,0 +1,164 @@
+/*
+ * MaldiDeepKit custom theme overrides for pydata-sphinx-theme.
+ *
+ * MaldiDeepKit uses an amber/orange accent (#ffa600) to distinguish it
+ * from MaldiAMRKit's teal->blue gradient while keeping the family look.
+ * Primary accent: #ffa600 (rgb 255, 166, 0).
+ *
+ * pydata-sphinx-theme expects --pst-color-primary as "R, G, B" (no rgb()).
+ */
+
+/* ---- Light mode ---- */
+html[data-theme="light"],
+body[data-theme="light"] {
+    --pst-color-primary: 255, 166, 0;
+    --pst-color-primary-highlight: 204, 132, 0;
+    --pst-color-primary-bg: 255, 244, 224;
+}
+
+/* ---- Dark mode ---- */
+html[data-theme="dark"],
+body[data-theme="dark"] {
+    --pst-color-primary: 255, 183, 51;
+    --pst-color-primary-highlight: 255, 200, 102;
+    --pst-color-primary-bg: 60, 40, 10;
+}
+
+/* ---- Navbar ---- */
+.bd-header {
+    border-bottom: 2px solid rgba(255, 166, 0, 0.25);
+}
+
+.navbar-brand img {
+    max-height: 48px;
+    width: auto;
+}
+
+/* ---- Sidebar active link ---- */
+.bd-sidebar .nav-link.active {
+    border-left-color: rgb(255, 166, 0);
+    font-weight: 600;
+}
+
+/* ---- sphinx-design cards ---- */
+.sd-card {
+    border-radius: 8px;
+    border: 1px solid rgba(255, 166, 0, 0.2);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.sd-card:hover {
+    box-shadow: 0 4px 16px rgba(255, 166, 0, 0.2);
+    transform: translateY(-2px);
+}
+
+.sd-card .sd-card-header {
+    background-color: rgba(255, 166, 0, 0.08);
+    border-bottom: 1px solid rgba(255, 166, 0, 0.15);
+    font-weight: 600;
+}
+
+/* ---- Feature grid cards: rounded with shadow ---- */
+.feature-grid .sd-card {
+    border: none;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+html[data-theme="dark"] .feature-grid .sd-card {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.feature-grid .sd-card:hover {
+    box-shadow: 0 6px 20px rgba(255, 166, 0, 0.3);
+    transform: translateY(-2px);
+}
+
+/* Keep card body content within the card and prevent inline code from
+ * forcing horizontal overflow. */
+.feature-grid .sd-card,
+.feature-grid .sd-card-body {
+    overflow: hidden;
+}
+
+.feature-grid .sd-card-body {
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+}
+
+.feature-grid .sd-card-body code,
+.feature-grid .sd-card-body .docutils.literal {
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+/* ---- Code blocks ---- */
+div.highlight {
+    border-left: 3px solid rgb(255, 166, 0);
+    border-radius: 4px;
+}
+
+/* ---- Admonitions ---- */
+.admonition.note {
+    border-left-color: rgb(255, 166, 0);
+}
+
+/* ---- Hero section (landing page) ---- */
+.hero-section {
+    text-align: center;
+    padding: 2rem 1rem 3rem;
+}
+
+/* Reset centering for subsections (Key Features, Quick Example, etc.) */
+.hero-section section {
+    text-align: left;
+}
+
+.hero-section img {
+    max-width: 280px;
+    margin-bottom: 1rem;
+}
+
+.hero-section p {
+    font-size: 1.15rem;
+    color: #555;
+    max-width: 700px;
+    margin: 0 auto 2rem;
+}
+
+html[data-theme="dark"] .hero-section p {
+    color: #bbb;
+}
+
+/* ---- Feature grid card titles ---- */
+.feature-grid .sd-card-title {
+    font-size: 1rem;
+    color: rgb(204, 132, 0);
+}
+
+html[data-theme="dark"] .feature-grid .sd-card-title {
+    color: rgb(255, 183, 51);
+}
+
+/* ---- Buttons ---- */
+.sd-btn-primary {
+    background-color: rgb(255, 166, 0) !important;
+    border-color: rgb(255, 166, 0) !important;
+    color: #fff !important;
+}
+
+.sd-btn-primary:hover {
+    background-color: rgb(204, 132, 0) !important;
+    border-color: rgb(204, 132, 0) !important;
+}
+
+.sd-btn-outline-primary {
+    color: rgb(204, 132, 0) !important;
+    border-color: rgb(255, 166, 0) !important;
+}
+
+.sd-btn-outline-primary:hover {
+    background-color: rgb(255, 166, 0) !important;
+    color: #fff !important;
+}

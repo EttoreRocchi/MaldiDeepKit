@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "MaldiDeepKit"
+dynamic = ["version", "dependencies", "optional-dependencies"]
+description = "A catalog of sklearn-compatible deep learning classifiers for MALDI-TOF binned spectra"
+readme = {file = "README.md", content-type = "text/markdown"}
+authors = [
+  { name = "Ettore Rocchi", email = "ettore.rocchi3@unibo.it" }
+]
+license = "MIT"
+requires-python = ">=3.10"
+keywords = [
+    "MALDI",
+    "MALDI-TOF",
+    "mass-spectrometry",
+    "deep-learning",
+    "pytorch",
+    "classification",
+    "AMR",
+    "antimicrobial-resistance",
+    "machine-learning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/EttoreRocchi/MaldiDeepKit"
+Documentation = "https://maldideepkit.readthedocs.io/"
+Source = "https://github.com/EttoreRocchi/MaldiDeepKit"
+Issues = "https://github.com/EttoreRocchi/MaldiDeepKit/issues"
+
+[tool.setuptools.dynamic]
+version = {attr = "maldideepkit.__version__"}
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.dynamic.optional-dependencies]
+dev = {file = ["requirements-dev.txt"]}
+docs = {file = ["requirements-docs.txt"]}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["maldideepkit*"]
+
+[tool.setuptools.package-data]
+maldideepkit = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests that require CUDA",
+    "needs_maldiamrkit: requires maldiamrkit to be installed",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:torch.*",
+    "ignore::FutureWarning:torch.*",
+]
+
+[tool.coverage.run]
+source = ["maldideepkit"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+exclude = [".git", ".github", "docs/_build", "build", "dist", "*.egg-info", "notebooks", "paper"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "D", "B"]
+ignore = ["E501", "D100", "D104", "D105", "D107"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+"paper/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+known-first-party = ["maldideepkit"]
