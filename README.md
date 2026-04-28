@@ -104,7 +104,7 @@ acc = clf.score(X, y)
 weights = clf.get_attention_weights(X[:10])  # (10, hidden_dim)
 ```
 
-### Inside an Sklearn Pipeline
+### Inside a scikit-learn `Pipeline`
 
 ```python
 from sklearn.model_selection import StratifiedKFold, cross_val_score
@@ -233,11 +233,9 @@ Pull requests, bug reports, and feature ideas are welcome. See the [Contributing
 
 ## Citing
 
-If you use MaldiDeepKit, please cite this repository until the companion paper is available.
+If you use MaldiDeepKit in academic work please cite:
 
-Related publications from the MaldiSuite ecosystem:
-
-> Rocchi, E., Nicitra, E., Calvo, M. et al. *Combining mass spectrometry and machine learning models for predicting Klebsiella pneumoniae antimicrobial resistance: a multicenter experience from clinical isolates in Italy*. **BMC Microbiol** (2026). [doi:10.1186/s12866-025-04657-2](https://link.springer.com/article/10.1186/s12866-025-04657-2)
+> _Citation will be available soon._
 
 See the [full publications list](https://maldideepkit.readthedocs.io/en/latest/papers.html) for more papers using the MaldiSuite.
 
