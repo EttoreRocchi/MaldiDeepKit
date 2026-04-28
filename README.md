@@ -38,6 +38,16 @@ pip install maldideepkit
 
 `maldiamrkit` is a core dependency and is installed automatically - MaldiDeepKit duck-types on the `MaldiSet` data model and reuses `maldiamrkit.alignment.Warping` for leak-safe spectral warping.
 
+### Install the full MaldiSuite
+
+To install MaldiDeepKit together with [MaldiAMRKit](https://github.com/EttoreRocchi/MaldiAMRKit) and [MaldiBatchKit](https://github.com/EttoreRocchi/MaldiBatchKit) at compatible versions, install the [`maldisuite`](https://pypi.org/project/maldisuite/) meta-package:
+
+```bash
+pip install maldisuite
+```
+
+Visit the **MaldiSuite** landing page at <https://ettorerocchi.github.io/MaldiSuite/>.
+
 ### Development Installation
 
 ```bash
@@ -205,13 +215,13 @@ For more detailed examples, see the notebooks:
 
 ## MaldiSuite Ecosystem
 
-MaldiDeepKit is the third package of the MaldiSuite ecosystem:
+MaldiDeepKit is the deep-learning package of the **MaldiSuite** ecosystem:
 
 - **[MaldiAMRKit](https://github.com/EttoreRocchi/MaldiAMRKit)** - preprocessing, alignment, peak detection, differential analysis, and classical-ML evaluation for MALDI-TOF AMR workflows.
 - **[MaldiBatchKit](https://github.com/EttoreRocchi/MaldiBatchKit)** - batch-effect correction and harmonisation for multi-centre / multi-instrument MALDI-TOF spectra.
 - **MaldiDeepKit** (this package) - sklearn-compatible deep learning classifiers.
 
-The three packages share the `MaldiSet` / `MaldiSpectrum` data model and are designed to compose in a single end-to-end pipeline.
+The three packages share the `MaldiSet` / `MaldiSpectrum` data model and are designed to compose in a single end-to-end pipeline. Install the full suite with `pip install maldisuite`. Landing page: [MaldiSuite](<https://ettorerocchi.github.io/MaldiSuite/>).
 
 ## Requirements
 
