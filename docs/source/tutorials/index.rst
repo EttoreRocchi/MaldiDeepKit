@@ -12,6 +12,7 @@ Each notebook is self-contained and can be downloaded from the
    notebooks/02_model_comparison
    notebooks/03_attention_interpretation
    notebooks/04_full_pipeline
+   notebooks/05_uncertainty
 
 Example Workflows
 -----------------

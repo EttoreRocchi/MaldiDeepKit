@@ -399,7 +399,9 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         y_encoded = np.searchsorted(self.classes_, y_np).astype(np.int64)
         return X_np, y_encoded
 
-    def fit(self, X: Any, y: Any) -> BaseSpectralClassifier:
+    def fit(
+        self, X: Any, y: Any, *, warm_start: bool = False
+    ) -> BaseSpectralClassifier:
         """Fit the model on ``(X, y)``.
 
         Parameters
@@ -410,6 +412,20 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         y : array-like of shape (n_samples,)
             Integer or string class labels. Re-encoded to ``0..n_classes-1``
             internally; original labels are preserved in :attr:`classes_`.
+        warm_start : bool, default=False
+            When ``True`` and the estimator already has a fitted
+            :attr:`model_`, the underlying :class:`torch.nn.Module` is
+            reused as the starting point of training instead of being
+            rebuilt from scratch via :meth:`_build_model`. This unblocks
+            federated learning, continual learning, and fine-tuning
+            workflows that need ``fit()`` to *resume* from the current
+            weights rather than reinitialise. ``warm_start`` applies only
+            to the first training attempt; retries triggered by
+            ``retry_on_val_auroc_below`` always rebuild via
+            :meth:`_build_model` (the warm-start weights already failed
+            once). When ``warm_start=True`` but no prior ``model_``
+            exists, falls back silently to a fresh build (sklearn
+            convention).
 
         Returns
         -------
@@ -456,7 +472,17 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             if attempt > 0:
                 seed_everything(base_seed + 1_000_003 * attempt)
 
-            model = self._build_model().to(device)
+            if (
+                warm_start
+                and attempt == 0
+                and getattr(self, "model_", None) is not None
+            ):
+                # Resume from the previously-fitted module. Skip
+                # _build_model entirely so the federated / continual
+                # learning caller's pre-loaded weights are not wiped.
+                model = self.model_.to(device)
+            else:
+                model = self._build_model().to(device)
 
             opt_cls = (
                 torch.optim.AdamW if float(self.weight_decay) > 0 else torch.optim.Adam

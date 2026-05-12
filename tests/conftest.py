@@ -108,9 +108,3 @@ ALL_FACTORIES = {
     "MaldiResNetClassifier": _resnet_tiny,
     "MaldiTransformerClassifier": _transformer_tiny,
 }
-
-
-@pytest.fixture(params=sorted(ALL_FACTORIES.keys()))
-def any_tiny_classifier(request):
-    """Parametrised fixture producing one tiny classifier per family."""
-    return ALL_FACTORIES[request.param]()

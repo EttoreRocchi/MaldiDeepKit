@@ -150,11 +150,15 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
         Width of the hidden dense layer.
     dropout : float, default=0.3
         Dropout applied inside every block and before the output layer.
-    **kwargs
-        Forwarded to :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`.
 
     Notes
     -----
+    Every parameter accepted by
+    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
+    ``calibrate_temperature``, ``device``, ``random_state``, ...) is
+    forwarded to the base class. See its docstring for the full list.
+
     The flat dense head scales linearly with ``input_dim``; prefer
     :class:`~maldideepkit.MaldiResNetClassifier` or
     :class:`~maldideepkit.MaldiTransformerClassifier` if you want

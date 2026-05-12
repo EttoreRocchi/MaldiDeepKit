@@ -1,4 +1,4 @@
-"""MaldiDeepKit -- deep learning classifiers for MALDI-TOF binned spectra.
+"""MaldiDeepKit - deep learning classifiers for MALDI-TOF binned spectra.
 
 Provides a catalog of PyTorch architectures (MLP, CNN, ResNet,
 Transformer) adapted to 1-D binned MALDI-TOF spectra, each wrapped in
@@ -6,18 +6,21 @@ a scikit-learn compatible estimator with sensible defaults.
 
 Subpackages
 -----------
-- ``maldideepkit.base`` -- ``BaseSpectralClassifier``, ``SpectralDataset``,
+- ``maldideepkit.base`` - ``BaseSpectralClassifier``, ``SpectralDataset``,
   ``make_loaders``.
-- ``maldideepkit.attention`` -- ``MaldiMLPClassifier`` (MLP with optional
+- ``maldideepkit.attention`` - ``MaldiMLPClassifier`` (MLP with optional
   sigmoid-gated attention).
-- ``maldideepkit.cnn`` -- ``MaldiCNNClassifier`` (Conv1D blocks).
-- ``maldideepkit.resnet`` -- ``MaldiResNetClassifier`` (1-D ResNet-18).
-- ``maldideepkit.transformer`` -- ``MaldiTransformerClassifier`` (1-D ViT).
-- ``maldideepkit.blocks`` -- re-exports of every backbone and
+- ``maldideepkit.cnn`` - ``MaldiCNNClassifier`` (Conv1D blocks).
+- ``maldideepkit.resnet`` - ``MaldiResNetClassifier`` (1-D ResNet-18).
+- ``maldideepkit.transformer`` - ``MaldiTransformerClassifier`` (1-D ViT).
+- ``maldideepkit.blocks`` - re-exports of every backbone and
   composable primitive for users embedding components into their own
   networks.
-- ``maldideepkit.utils`` -- reproducibility helpers and shared
+- ``maldideepkit.utils`` - reproducibility helpers and shared
   training primitives.
+- ``maldideepkit.uncertainty`` - uncertainty-quantification
+  estimators (MC Dropout, Laplace approximation, split conformal
+  prediction) for fitted classifiers.
 
 Examples
 --------
@@ -31,6 +34,7 @@ Examples
 >>> proba = clf.predict_proba(X)
 """
 
+from . import uncertainty
 from .attention.mlp import MaldiMLPClassifier
 from .base.classifier import BaseSpectralClassifier
 from .base.data import SpectralDataset, make_loaders
@@ -38,7 +42,7 @@ from .cnn.cnn import MaldiCNNClassifier
 from .resnet.resnet import MaldiResNetClassifier
 from .transformer.transformer import MaldiTransformerClassifier
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Ettore Rocchi"
 
 __all__ = [
@@ -51,4 +55,5 @@ __all__ = [
     "__author__",
     "__version__",
     "make_loaders",
+    "uncertainty",
 ]

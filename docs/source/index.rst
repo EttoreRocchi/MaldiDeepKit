@@ -16,9 +16,9 @@ MaldiDeepKit Documentation
 ==========================
 
 A catalog of sklearn-compatible deep learning classifiers for MALDI-TOF
-mass spectrometry. Four PyTorch architectures -- MLP (with optional
+mass spectrometry. Four PyTorch architectures - MLP (with optional
 sigmoid-gated attention), 1-D CNN, 1-D ResNet, and 1-D Vision
-Transformer -- wrapped in a unified estimator API, with defaults
+Transformer - wrapped in a unified estimator API, with defaults
 calibrated for ~6000-bin MALDI-TOF input.
 
 .. container:: sd-d-flex-row sd-flex-justify-content-center sd-gap-2 sd-mb-4
@@ -57,7 +57,7 @@ Key Features
       :link-type: url
 
       MLP with optional attention, 1-D CNN, 1-D ResNet, and 1-D Vision
-      Transformer -- all calibrated for ~6000-bin MALDI-TOF spectra
+      Transformer - all calibrated for ~6000-bin MALDI-TOF spectra
       out of the box.
 
    .. grid-item-card:: Sklearn-Compatible
@@ -116,6 +116,14 @@ Key Features
       threshold tuning on the validation split, all togglable via
       classifier kwargs.
 
+   .. grid-item-card:: Uncertainty Quantification
+      :link: api/uncertainty.html
+      :link-type: url
+
+      Three drop-in estimators on a shared
+      ``predict_with_uncertainty`` interface: Monte Carlo Dropout,
+      Laplace approximation, and split conformal prediction (LAC).
+
    .. grid-item-card:: Reproducible Training
       :link: api/base.html
       :link-type: url
@@ -137,14 +145,15 @@ Key Features
       :link-type: url
 
       CPU fallback is fully supported and is what the project's CI runs
-      against; CUDA speeds up the Transformer significantly.
+      against; CUDA significantly speeds up training across all four
+      architectures.
 
    .. grid-item-card:: MaldiSuite Ecosystem
       :link: papers.html
       :link-type: url
 
       Sibling of ``MaldiAMRKit`` (preprocessing) and ``MaldiBatchKit``
-      (batch correction) -- three packages sharing the same data model.
+      (batch correction) - three packages sharing the same data model.
 
 ----
 
@@ -166,7 +175,7 @@ Quick Example
    proba = clf.predict_proba(X)
    weights = clf.get_attention_weights(X[:10])   # (10, hidden_dim)
 
-Train/test without leakage -- the optional spectral warper is fit on
+Train/test without leakage - the optional spectral warper is fit on
 the training fold only and applied to held-out samples via the same
 fitted parameters at ``predict`` time:
 

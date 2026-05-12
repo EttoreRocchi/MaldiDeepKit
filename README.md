@@ -38,6 +38,14 @@ pip install maldideepkit
 
 `maldiamrkit` is a core dependency and is installed automatically - MaldiDeepKit duck-types on the `MaldiSet` data model and reuses `maldiamrkit.alignment.Warping` for leak-safe spectral warping.
 
+To enable the Laplace-approximation estimator in `maldideepkit.uncertainty`, install the optional `uncertainty` extra (pulls in [`laplace-torch`](https://github.com/aleximmer/Laplace)):
+
+```bash
+pip install "maldideepkit[uncertainty]"
+```
+
+Monte Carlo Dropout and split conformal prediction work without any extra.
+
 ### Install the full MaldiSuite
 
 To install MaldiDeepKit together with [MaldiAMRKit](https://github.com/EttoreRocchi/MaldiAMRKit) and [MaldiBatchKit](https://github.com/EttoreRocchi/MaldiBatchKit) at compatible versions, install the [`maldisuite`](https://pypi.org/project/maldisuite/) meta-package:
@@ -73,6 +81,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for coding conventions, testing, and PR
 - **Leak-safe spectral warping**: pass any sklearn-style transformer ([`maldiamrkit.alignment.Warping`](https://github.com/EttoreRocchi/MaldiAMRKit)) via `warping=`; it is fitted on the training fold only and applied to both splits during training and to new spectra at `predict` time, *before* per-feature standardization.
 - **MaldiSet integration**: pass a `maldiamrkit.MaldiSet` directly to `fit` / `predict`; MaldiDeepKit duck-types on the DataFrame-like `.X` attribute, so MaldiSuite's data model flows end-to-end.
 - **Persistence**: `save()` writes a state-dict `.pt` plus a hyperparameter `.json` (and a sibling `.warper.pkl` if a warper was fitted); `load()` fails fast on class or `input_dim` mismatches.
+- **Uncertainty quantification**: `maldideepkit.uncertainty` subpackage ships three drop-in estimators sharing a single `predict_with_uncertainty` interface. `MCDropoutEstimator` (Monte Carlo Dropout with epistemic / aleatoric decomposition), `LaplaceEstimator` (last-layer or full-network Laplace via the optional `laplace-torch` dependency), and `ConformalPredictor` (split conformal prediction with the LAC non-conformity score).
 - **CPU-friendly**: every classifier runs on CPU, which is what the project's CI tests against; CUDA speeds up the models' training significantly.
 
 ## Documentation
@@ -202,7 +211,7 @@ All four inherit from `BaseSpectralClassifier` and share the same hyperparameter
 
 - **`find_lr(clf, X, y)`** - learning-rate finder.
 - **`tune_threshold` / `fit_temperature`** - post-hoc calibrators usable standalone.
-- **`FocalLoss`, `SAMOptimizer`, `DropPath`** - building blocks for custom training loops.
+- **`FocalLoss`, `SAMOptimizer`** - loss / optimizer building blocks for custom training loops. Composable `nn.Module` primitives (`DropPath`, `PatchEmbed1D`, the full backbones) live under `maldideepkit.blocks`.
 
 ## Tutorials
 
@@ -212,6 +221,7 @@ For more detailed examples, see the notebooks:
 - [Model Comparison](notebooks/02_model_comparison.ipynb) - Train all four classifiers on the same dataset and compare accuracy.
 - [Attention Interpretation](notebooks/03_attention_interpretation.ipynb) - Visualise the sigmoid-gated attention learned by `MaldiMLPClassifier`.
 - [Full Pipeline](notebooks/04_full_pipeline.ipynb) - End-to-end template: MaldiAMRKit preprocessing + MaldiDeepKit classification.
+- [Uncertainty Quantification](notebooks/05_uncertainty.ipynb) - MC Dropout, split conformal prediction, and Laplace approximation on a fitted classifier; selective prediction curves.
 
 ## MaldiSuite Ecosystem
 

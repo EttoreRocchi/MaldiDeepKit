@@ -95,7 +95,7 @@ class TestFromSpectrumSemanticSplit:
 
     def test_transformer_is_scale_agnostic(self):
         """Transformer's ``from_spectrum`` forwards ``input_dim`` and leaves
-        architectural knobs alone -- the learned positional embedding sizes
+        architectural knobs alone - the learned positional embedding sizes
         itself to whatever token count the patch embedding produces, so no
         per-layout scaling is needed. Same rationale as the MLP."""
         a = MaldiTransformerClassifier.from_spectrum(bin_width=3, input_dim=6000)

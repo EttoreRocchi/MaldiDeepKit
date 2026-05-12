@@ -58,6 +58,17 @@ Diagnostics
 
 .. autofunction:: maldideepkit.utils.find_lr
 
+Ensembling
+----------
+
+Mean-of-``predict_proba`` ensemble that fits each member independently
+and averages their probability outputs at inference time.
+
+.. autoclass:: maldideepkit.utils.SpectralEnsemble
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 Example
 -------
 

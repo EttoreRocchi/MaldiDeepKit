@@ -336,11 +336,15 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
         Token aggregation for classification.
     head_dim : int, default=128
         Width of the hidden dense layer in the classification head.
-    **kwargs
-        Forwarded to :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`.
 
     Notes
     -----
+    Every parameter accepted by
+    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
+    ``calibrate_temperature``, ``device``, ``random_state``, ...) is
+    forwarded to the base class. See its docstring for the full list.
+
     Transformer training recipe baked in as defaults: ``lr=3e-4``,
     ``weight_decay=0.05``, ``grad_clip_norm=1.0``, ``warmup_epochs=5``.
 

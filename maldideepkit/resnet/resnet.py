@@ -35,8 +35,6 @@ class BasicBlock1D(nn.Module):
         Kernel size of both Conv1D layers.
     """
 
-    expansion = 1
-
     def __init__(
         self,
         in_channels: int,
@@ -220,11 +218,18 @@ class MaldiResNetClassifier(BaseSpectralClassifier):
         reproduce the literal ResNet-18 backbone.
     dropout : float, default=0.2
         Dropout before the final linear layer.
-    **kwargs
-        Forwarded to :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`.
 
     Notes
     -----
+    Every parameter accepted by
+    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
+    ``calibrate_temperature``, ``device``, ``random_state``, ...) is
+    forwarded to the base class. The ResNet defaults pre-set
+    ``weight_decay=1e-4``, ``grad_clip_norm=1.0``, ``warmup_epochs=5``,
+    and ``input_transform="log1p"``; override any of them at
+    construction time.
+
     Defaults deviate from literal ResNet-18 (He et al., 2016) in three
     ways for MALDI-TOF: ``stem_stride=1`` (was 2),
     ``block_kernel_size=7`` (was 3), and ``use_stem_pool=False`` (was

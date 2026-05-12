@@ -11,13 +11,13 @@ The helper in this module downloads the tarball once, caches it under
 ``MALDIDEEPKIT_CACHE_DIR`` environment variable), extracts it, and
 returns a :class:`DemoDataset` populated with:
 
-* ``X``    -- binned feature matrix obtained via
+* ``X``    - binned feature matrix obtained via
   :class:`maldiamrkit.MaldiSet` (samples x m/z bins).
-* ``meta`` -- per-sample metadata: ``Batch`` (= acquisition centre),
+* ``meta`` - per-sample metadata: ``Batch`` (= acquisition centre),
   ``Species`` (Klebsiella species), and the AMR labels
   ``Amikacin`` / ``Meropenem`` (``R``/``S``/``I``).
-* ``mz``   -- m/z axis reported by ``MaldiSet`` (bin starts in Da).
-* ``maldi_set`` -- the underlying ``MaldiSet`` object, for notebooks
+* ``mz``   - m/z axis reported by ``MaldiSet`` (bin starts in Da).
+* ``maldi_set`` - the underlying ``MaldiSet`` object, for notebooks
   that want to plug straight into the MaldiAMRKit ecosystem.
 
 This module lives exclusively under ``notebooks/`` and is intentionally

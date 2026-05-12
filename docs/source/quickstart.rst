@@ -8,7 +8,7 @@ Fitting a Classifier
 --------------------
 
 Every MaldiDeepKit classifier exposes the standard scikit-learn estimator
-API -- ``fit``, ``predict``, ``predict_proba``, and ``score``:
+API - ``fit``, ``predict``, ``predict_proba``, and ``score``:
 
 .. code-block:: python
 
@@ -73,8 +73,8 @@ depth.
 Integration with MaldiAMRKit
 ----------------------------
 
-Any object with a DataFrame-like ``.X`` attribute -- notably
-:class:`maldiamrkit.MaldiSet` -- is accepted directly:
+Any object with a DataFrame-like ``.X`` attribute - notably
+:class:`maldiamrkit.MaldiSet` - is accepted directly:
 
 .. code-block:: python
 
@@ -199,7 +199,7 @@ Spectral Warping (pre-scaling)
 ------------------------------
 
 Pass any sklearn-style transformer with ``fit(X) / transform(X)`` --
-typically :class:`maldiamrkit.alignment.Warping` -- via ``warping=``.
+typically :class:`maldiamrkit.alignment.Warping` - via ``warping=``.
 It is fitted on the **training split only** (so no leakage from the
 validation fold) and applied to both splits, *before* per-feature
 standardization. At :meth:`predict` time, incoming spectra are

@@ -14,15 +14,27 @@ MaldiDeepKit requires Python 3.10 - 3.13 and pulls in PyTorch (≥ 2.0),
 scikit-learn, einops, numpy, pandas, scipy, and matplotlib as its core
 runtime dependencies.
 
+Optional extras
+---------------
+
+The uncertainty-quantification estimators in
+:mod:`maldideepkit.uncertainty` work out of the box for Monte Carlo
+Dropout and split conformal prediction. The Laplace approximation
+estimator additionally requires the optional ``laplace-torch``
+dependency, available via the ``uncertainty`` extra:
+
+.. code-block:: bash
+
+   pip install "maldideepkit[uncertainty]"
+
 GPU vs. CPU
 -----------
 
 Every classifier runs on CPU, which is what the project's continuous
-integration tests against.
-:class:`~maldideepkit.MaldiTransformerClassifier` benefits significantly
-from a CUDA device when training on ~6000-bin spectra; point it at one
-by passing ``device="cuda"`` at construction, or leave the default
-``device="auto"`` to pick the best available.
+integration tests against. All four architectures benefit
+significantly from CUDA when training on ~6000-bin spectra; point a
+classifier at a GPU by passing ``device="cuda"`` at construction, or
+leave the default ``device="auto"`` to pick the best available.
 
 Development Installation
 ------------------------

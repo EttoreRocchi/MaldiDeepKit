@@ -40,11 +40,11 @@ Style
 
 - NumPy-style docstrings for all public API.
 - :class:`~maldideepkit.BaseSpectralClassifier` subclasses should
-  override only ``_build_model()`` -- the base class handles device
+  override only ``_build_model()`` - the base class handles device
   placement, validation splits, early stopping, calibration, and
   persistence. Store fitted attributes with trailing underscores
   (``threshold_``, ``temperature_``, ``warper_``, ...).
-- ``predict`` / ``predict_proba`` must be idempotent -- no side effects
+- ``predict`` / ``predict_proba`` must be idempotent - no side effects
   outside ``fit``.
 - Seed Python, NumPy, and PyTorch via ``random_state`` so identical
   configs produce identical weights.
@@ -70,7 +70,7 @@ Submitting Changes
 
 1. Fork the repository and create a feature branch from ``main``.
 2. Add tests for any new functionality; aim to keep coverage ≥ 95%.
-3. Run ``make test`` and ``make lint`` -- both must be clean.
+3. Run ``make test`` and ``make lint`` - both must be clean.
 4. Update ``CHANGELOG.md`` under the next version heading.
 5. Open a pull request with a clear title and a body that motivates
    the design decision (not just what changed).

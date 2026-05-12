@@ -14,6 +14,8 @@ organized by module.
    resnet
    transformer
    blocks
+   augment
+   uncertainty
    utils
 
 Base Classes
@@ -75,3 +77,31 @@ Training Utilities
    maldideepkit.utils.tune_threshold
    maldideepkit.utils.fit_temperature
    maldideepkit.utils.find_lr
+   maldideepkit.utils.SpectralEnsemble
+
+Augmentation
+------------
+
+Per-batch augmentations applied to training batches only; bypassed
+during validation and inference. See :doc:`augment` for the full API.
+
+.. autosummary::
+   :nosignatures:
+
+   maldideepkit.augment.SpectrumAugment
+   maldideepkit.augment.apply_mixup
+   maldideepkit.augment.apply_cutmix
+
+Uncertainty Quantification
+--------------------------
+
+Drop-in estimators that wrap a fitted classifier and return calibrated
+predictions plus per-sample uncertainty. See :doc:`uncertainty`.
+
+.. autosummary::
+   :nosignatures:
+
+   maldideepkit.uncertainty.MCDropoutEstimator
+   maldideepkit.uncertainty.LaplaceEstimator
+   maldideepkit.uncertainty.ConformalPredictor
+   maldideepkit.uncertainty.UncertaintyResult

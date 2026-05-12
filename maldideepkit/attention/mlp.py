@@ -121,12 +121,14 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         Dropout after the projection and first head layer.
     dropout_low : float, default=0.2
         Dropout before the output logits.
-    **kwargs
-        Forwarded to :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`:
-        ``input_dim``, ``n_classes``, ``learning_rate``, ``batch_size``,
-        ``epochs``, ``early_stopping_patience``, ``val_fraction``,
-        ``standardize``, ``class_weight``, ``device``, ``random_state``,
-        ``verbose``.
+
+    Notes
+    -----
+    Every parameter accepted by
+    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
+    ``calibrate_temperature``, ``device``, ``random_state``, ...) is
+    forwarded to the base class. See its docstring for the full list.
 
     Attributes
     ----------
@@ -258,12 +260,14 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
             self.attention_weights_ = None
         return logits
 
-    def fit(self, X: Any, y: Any) -> MaldiMLPClassifier:  # type: ignore[override]
+    def fit(  # type: ignore[override]
+        self, X: Any, y: Any, *, warm_start: bool = False
+    ) -> MaldiMLPClassifier:
         """Fit the model and cache attention weights from the final batch.
 
-        See :meth:`BaseSpectralClassifier.fit` for shared parameters.
+        See :meth:`BaseSpectralClassifier.fit` for shared parameters, including ``warm_start``.
         """
-        super().fit(X, y)
+        super().fit(X, y, warm_start=warm_start)
         if self.use_attention:
             X_np = _to_numpy(X)
             tail = X_np[: min(len(X_np), 64)]
