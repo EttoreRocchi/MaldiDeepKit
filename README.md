@@ -28,7 +28,7 @@
   <a href="#license">License</a>
 </p>
 
-MaldiDeepKit is part of the **MaldiSuite** ecosystem and complements [MaldiAMRKit](https://github.com/EttoreRocchi/MaldiAMRKit) and [MaldiBatchKit](https://github.com/EttoreRocchi/MaldiBatchKit): where MaldiAMRKit handles preprocessing, alignment and AMR-aware evaluation, and MaldiBatchKit harmonises multi-centre spectra, MaldiDeepKit focuses on the *classification* step, providing four PyTorch architectures wrapped in a unified scikit-learn estimator API with defaults calibrated for 6000-bin MALDI-TOF input.
+MaldiDeepKit is part of the **MaldiSuite** ecosystem and complements [MaldiAMRKit](https://github.com/EttoreRocchi/MaldiAMRKit) and [MaldiBatchKit](https://github.com/EttoreRocchi/MaldiBatchKit): where MaldiAMRKit handles preprocessing, alignment and AMR-aware evaluation, and MaldiBatchKit harmonises multi-centre spectra, MaldiDeepKit focuses on the *classification* step, providing four PyTorch backbone architectures (MLP, 1-D CNN, 1-D ResNet, and 1-D Vision Transformer) plus a dual-branch classifier for spectrum + side-feature inputs and a self-training meta-classifier for semi-supervised data, all wrapped in a unified scikit-learn estimator API with defaults calibrated for 6000-bin MALDI-TOF input.
 
 ## Installation
 
@@ -36,7 +36,7 @@ MaldiDeepKit is part of the **MaldiSuite** ecosystem and complements [MaldiAMRKi
 pip install maldideepkit
 ```
 
-`maldiamrkit` is a core dependency and is installed automatically - MaldiDeepKit duck-types on the `MaldiSet` data model and reuses `maldiamrkit.alignment.Warping` for leak-safe spectral warping.
+`maldiamrkit` is a core dependency and is installed automatically (MaldiDeepKit duck-types on the `MaldiSet` data model and reuses `maldiamrkit.alignment.Warping` for leak-safe spectral warping).
 
 To enable the Laplace-approximation estimator in `maldideepkit.uncertainty`, install the optional `uncertainty` extra (pulls in [`laplace-torch`](https://github.com/aleximmer/Laplace)):
 
@@ -45,6 +45,12 @@ pip install "maldideepkit[uncertainty]"
 ```
 
 Monte Carlo Dropout and split conformal prediction work without any extra.
+
+The `smiles_to_fingerprint` helper used in `MaldiDualBranchClassifier` workflows requires RDKit, available via the `rdkit` extra:
+
+```bash
+pip install "maldideepkit[rdkit]"
+```
 
 ### Install the full MaldiSuite
 
@@ -77,7 +83,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for coding conventions, testing, and PR
   - `MaldiTransformerClassifier` - 1-D Vision Transformer with global self-attention, pre-norm, LayerScale, and stochastic depth.
 - **MALDI-TOF defaults**: kernel sizes, depths, patch widths, and warmup / cosine-annealing schedules are tuned for 6000-bin spectra in the 2000-20000 Da range.
 - **Auto-scaling for non-default layouts**: every classifier ships a `from_spectrum(bin_width, input_dim, **overrides)` factory that rescales conv kernels and patches when the user trims the m/z range or picks a different bin width. See the [Spectrum scaling guide](https://maldideepkit.readthedocs.io/en/latest/spectrum_scaling.html).
-- **Training recipes**: AdamW-on-`weight_decay` dispatch, gradient clipping, linear warmup + cosine annealing, focal loss, label smoothing, mixed precision (AMP), Stochastic Weight Averaging, Sharpness-Aware Minimization, post-hoc threshold tuning, and temperature scaling - all exposed as classifier kwargs.
+- **Training recipes**: AdamW-on-`weight_decay` dispatch, gradient clipping, linear warmup + cosine annealing, focal loss, label smoothing, mixed precision (AMP), Stochastic Weight Averaging, Sharpness-Aware Minimization, post-hoc threshold tuning, and temperature scaling (all exposed as classifier kwargs).
 - **Leak-safe spectral warping**: pass any sklearn-style transformer ([`maldiamrkit.alignment.Warping`](https://github.com/EttoreRocchi/MaldiAMRKit)) via `warping=`; it is fitted on the training fold only and applied to both splits during training and to new spectra at `predict` time, *before* per-feature standardization.
 - **MaldiSet integration**: pass a `maldiamrkit.MaldiSet` directly to `fit` / `predict`; MaldiDeepKit duck-types on the DataFrame-like `.X` attribute, so MaldiSuite's data model flows end-to-end.
 - **Persistence**: `save()` writes a state-dict `.pt` plus a hyperparameter `.json` (and a sibling `.warper.pkl` if a warper was fitted); `load()` fails fast on class or `input_dim` mismatches.
@@ -185,8 +191,15 @@ For more examples covering training recipes, calibration, attention inspection, 
 | `MaldiCNNClassifier`           | 1-D Conv1D + BatchNorm + ReLU + MaxPool blocks         | Local pattern learning from binned spectra             |
 | `MaldiResNetClassifier`        | 1-D ResNet-18-style residual blocks                    | Deeper convolutional backbone                          |
 | `MaldiTransformerClassifier`   | 1-D Vision Transformer (LayerScale, stochastic depth)  | Long-range peak combinations via global self-attention |
+| `MaldiDualBranchClassifier`    | Spectrum branch + per-row side-feature branch + fused head | Multi-modal: condition on antibiotic fingerprint, instrument ID, patient feature, ... |
 
-All four inherit from `BaseSpectralClassifier` and share the same hyperparameter surface for optimisation, device placement, early stopping, calibration, and persistence.
+All five inherit from `BaseSpectralClassifier` (or its dual-input subclass `BaseDualSpectralClassifier`) and share the same hyperparameter surface for optimisation, device placement, early stopping, calibration, and persistence.
+
+### Semi-supervised wrapper
+
+| Class | Purpose |
+|---|---|
+| `MaldiSelfTrainingClassifier` | Iterative pseudo-labeling on a labeled seed plus an unlabeled pool (rows marked `-1` by default). Wraps any classifier (defaults to `MaldiMLPClassifier`); follows the `sklearn.semi_supervised.SelfTrainingClassifier` API. |
 
 ### Shared Training Knobs
 
@@ -196,7 +209,7 @@ All four inherit from `BaseSpectralClassifier` and share the same hyperparameter
 | Gradient clipping                  | `grad_clip_norm`               | `clip_grad_norm_` before every step. Default on (`1.0`) for the deep models.        |
 | Warmup + cosine annealing          | `warmup_epochs`                | Replaces plateau scheduler. Default `5` (deep models), `0` (MLP/CNN).               |
 | Stochastic depth (Transformer)     | `drop_path_rate`               | Linearly ramped across blocks. Default `0.1`.                                       |
-| LayerScale (Transformer)           | `layerscale_init`              | Per-channel residual scaling initialised near zero - crucial on small cohorts.      |
+| LayerScale (Transformer)           | `layerscale_init`              | Per-channel residual scaling initialised near zero (crucial on small cohorts).      |
 | Focal loss                         | `loss="focal"` + `focal_gamma` | For imbalanced binary problems.                                                     |
 | Label smoothing                    | `label_smoothing`              | Passed to both cross-entropy and focal paths.                                       |
 | Stochastic Weight Averaging        | `swa_start_epoch`              | `AveragedModel` replaces best-val at end of fit.                                    |
@@ -204,6 +217,8 @@ All four inherit from `BaseSpectralClassifier` and share the same hyperparameter
 | Temperature scaling                | `calibrate_temperature`        | One-parameter LBFGS calibration on val logits.                                      |
 | Sharpness-Aware Minimization       | `use_sam` + `sam_rho`          | Two-pass training, ~2× compute.                                                     |
 | Spectral warping                   | `warping`                      | Any `Warping`-like sklearn transformer; fitted on train only, applied before standardization.      |
+| Per-sample weighting               | `sample_weight` (`fit`)        | sklearn-style weighted-mean loss; composes with `class_weight` and flows into early stopping, threshold tuning, and temperature scaling. |
+| Warm-start / resume                | `warm_start` (`fit`)           | Reuse the existing fitted module as the training start point (continual / federated / fine-tuning).  |
 
 ### Utilities
 

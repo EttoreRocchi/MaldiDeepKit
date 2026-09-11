@@ -1,4 +1,4 @@
-"""sklearn-compatibility tests for the six MaldiDeepKit classifiers.
+"""sklearn-compatibility tests for every MaldiDeepKit classifier.
 
 These run a subset of ``sklearn.utils.estimator_checks`` that is
 compatible with a tiny, GPU-free training configuration, plus a few

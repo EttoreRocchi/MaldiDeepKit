@@ -12,6 +12,7 @@ import torch
 
 from maldideepkit import (
     MaldiCNNClassifier,
+    MaldiDualBranchClassifier,
     MaldiMLPClassifier,
     MaldiResNetClassifier,
     MaldiTransformerClassifier,
@@ -102,9 +103,24 @@ def _transformer_tiny(**kwargs):
     return MaldiTransformerClassifier(**defaults)
 
 
+def _dual_branch_tiny(**kwargs):
+    defaults = dict(
+        n_spec_bins=96,
+        spec_hidden_dims=(16,),
+        fp_hidden_dims=(8,),
+        epochs=2,
+        batch_size=8,
+        early_stopping_patience=3,
+        random_state=0,
+    )
+    defaults.update(kwargs)
+    return MaldiDualBranchClassifier(**defaults)
+
+
 ALL_FACTORIES = {
     "MaldiMLPClassifier": _mlp_tiny,
     "MaldiCNNClassifier": _cnn_tiny,
     "MaldiResNetClassifier": _resnet_tiny,
     "MaldiTransformerClassifier": _transformer_tiny,
+    "MaldiDualBranchClassifier": _dual_branch_tiny,
 }

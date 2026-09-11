@@ -35,12 +35,12 @@ are installed (`pre-commit install`).
 
 - NumPy-style docstrings for all public API.
 - `BaseSpectralClassifier` subclasses should override only
-  `_build_model()` - the base class handles device placement, validation
-  splits, early stopping, calibration, and persistence. Store fitted
+  `_build_model()` (the base class handles device placement, validation
+  splits, early stopping, calibration, and persistence). Store fitted
   attributes with trailing underscores (`threshold_`, `temperature_`,
   `warper_`, ...).
-- `predict` / `predict_proba` must be idempotent - no side effects
-  outside `fit`.
+- `predict` / `predict_proba` must be idempotent (no side effects
+  outside `fit`).
 - Seed Python, NumPy, and PyTorch via `random_state` so identical
   configs produce identical weights.
 

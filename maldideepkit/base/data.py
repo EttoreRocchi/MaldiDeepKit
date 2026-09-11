@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -58,6 +58,10 @@ class SpectralDataset(Dataset):
     std : array-like, optional
         Pre-computed per-feature standard deviations. Ignored when
         ``standardize=False``.
+    sample_weight : array-like, optional
+        Per-sample weights of shape ``(n_samples,)``. When given, the
+        dataset yields ``(x, y, w)`` triples; otherwise it yields the
+        usual 2-tuples. Requires ``y`` to be set.
 
     Attributes
     ----------
@@ -65,6 +69,8 @@ class SpectralDataset(Dataset):
         Stored features as a float32 tensor.
     y : torch.Tensor or None
         Stored labels as a long tensor, or ``None`` for inference.
+    sample_weight : torch.Tensor or None
+        Stored per-sample weights as a float32 tensor, or ``None``.
     mean : torch.Tensor or None
         Feature-wise mean used for standardization.
     std : torch.Tensor or None
@@ -79,6 +85,7 @@ class SpectralDataset(Dataset):
         standardize: bool = False,
         mean: np.ndarray | None = None,
         std: np.ndarray | None = None,
+        sample_weight: np.ndarray | None = None,
     ) -> None:
         X_np = _to_numpy(X)
 
@@ -108,13 +115,37 @@ class SpectralDataset(Dataset):
         else:
             self.y = None
 
+        if sample_weight is not None:
+            if y is None:
+                raise ValueError(
+                    "sample_weight requires y to be provided; "
+                    "weights have no meaning at inference time."
+                )
+            sw_np = np.asarray(sample_weight, dtype=np.float32).ravel()
+            if sw_np.shape[0] != self.X.shape[0]:
+                raise ValueError(
+                    f"sample_weight has {sw_np.shape[0]} entries "
+                    f"but X has {self.X.shape[0]} rows."
+                )
+            self.sample_weight: torch.Tensor | None = torch.from_numpy(sw_np)
+        else:
+            self.sample_weight = None
+
     def __len__(self) -> int:
         return int(self.X.shape[0])
 
-    def __getitem__(self, idx: int) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(
+        self, idx: int
+    ) -> (
+        torch.Tensor
+        | tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
         if self.y is None:
             return self.X[idx]
-        return self.X[idx], self.y[idx]
+        if self.sample_weight is None:
+            return self.X[idx], self.y[idx]
+        return self.X[idx], self.y[idx], self.sample_weight[idx]
 
 
 INPUT_TRANSFORMS = ("standardize", "log1p", "robust", "log1p+standardize", "none")
@@ -182,6 +213,44 @@ def apply_input_transform(X: np.ndarray, state: dict[str, Any]) -> np.ndarray:
     raise ValueError(f"Unknown input_transform state mode={mode!r}.")
 
 
+def _transform_leading_cols(
+    X: np.ndarray,
+    n_cols: int | None,
+    fn: Callable[[np.ndarray], np.ndarray],
+) -> np.ndarray:
+    """Apply ``fn`` to the first ``n_cols`` columns of ``X`` only.
+
+    Dual-input classifiers pack a per-row side feature into ``X`` by
+    column concatenation (``[ X_spec | X_side ]``). Spectrum-specific
+    preprocessing (warping, ``log1p``, standardization) is
+    meaningless on the side block (an antibiotic fingerprint is not a
+    spectrum), so it is confined to the leading ``n_cols`` columns and
+    the trailing block is passed through untouched.
+
+    ``n_cols=None``, or a value covering every column, applies ``fn``
+    to the whole matrix (the single-input case).
+
+    Raises
+    ------
+    ValueError
+        If ``fn`` changes the column count of the leading block, which
+        would silently misalign the spectrum / side split point.
+    """
+    if n_cols is None or int(n_cols) >= X.shape[1]:
+        return np.asarray(fn(X), dtype=np.float32)
+    n = int(n_cols)
+    head = np.asarray(fn(X[:, :n]), dtype=np.float32)
+    if head.shape[1] != n:
+        raise ValueError(
+            f"A preprocessing step changed the spectrum block width from "
+            f"{n} to {head.shape[1]} columns. Dual-input models need the "
+            "split point to stay fixed; re-bin the spectra before fit() "
+            "instead, or drop the width-changing transform."
+        )
+    tail = X[:, n:].astype(np.float32, copy=False)
+    return np.hstack([head, tail]).astype(np.float32, copy=False)
+
+
 def _warp_numpy(warper: Any, X_np: np.ndarray) -> np.ndarray:
     """Apply a fitted warper to a numpy matrix, returning a numpy matrix."""
     df = pd.DataFrame(X_np)
@@ -203,6 +272,8 @@ def make_loaders(
     stratify: bool = True,
     num_workers: int = 0,
     warper: Any | None = None,
+    sample_weight: np.ndarray | None = None,
+    n_transform_cols: int | None = None,
 ) -> tuple[DataLoader, DataLoader, dict[str, Any]]:
     """Build stratified train / validation :class:`DataLoader` pairs.
 
@@ -247,6 +318,21 @@ def make_loaders(
         self`` + ``transform(X) -> X``. Fitted on the training split
         only and used to transform both splits. The fitted object is
         returned in ``stats["warper"]``.
+    sample_weight : ndarray of shape (n_samples,), optional
+        Per-sample weights. When given, they are split alongside ``X``
+        and ``y`` via the same stratified train/val split, attached to
+        the training :class:`SpectralDataset` (so batches yield
+        ``(x, y, w)`` triples), and returned in ``stats["sample_weight_val"]``
+        for downstream val-side weighting.
+    n_transform_cols : int, optional
+        Confine ``warper``, ``standardize`` and ``input_transform`` to
+        the first ``n_transform_cols`` columns of ``X``, passing the
+        rest through untouched. Used by dual-input classifiers, whose
+        ``X`` is ``[ X_spec | X_side ]`` and whose side block must not
+        be log-transformed, warped, or standardized as if it were a
+        spectrum. ``None`` (default) transforms every column. The
+        returned ``stats["mean"]`` / ``stats["std"]`` then cover only
+        the leading block.
 
     Returns
     -------
@@ -257,7 +343,8 @@ def make_loaders(
         Non-shuffling validation loader.
     stats : dict
         ``{"mean": array or None, "std": array or None, "warper":
-        fitted warper or None, "input_transform_state": dict}``.
+        fitted warper or None, "input_transform_state": dict,
+        "sample_weight_val": ndarray or None}``.
     """
     X_np = _to_numpy(X)
     if hasattr(y, "to_numpy"):
@@ -267,32 +354,61 @@ def make_loaders(
     _, counts = np.unique(y_np, return_counts=True)
     can_stratify = stratify and counts.min() >= 2
 
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_np,
-        y_np,
-        test_size=val_size,
-        random_state=random_state,
-        stratify=y_np if can_stratify else None,
-    )
+    if sample_weight is None:
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X_np,
+            y_np,
+            test_size=val_size,
+            random_state=random_state,
+            stratify=y_np if can_stratify else None,
+        )
+        sw_tr: np.ndarray | None = None
+        sw_val: np.ndarray | None = None
+    else:
+        sw_np = np.asarray(sample_weight, dtype=np.float32).ravel()
+        if sw_np.shape[0] != X_np.shape[0]:
+            raise ValueError(
+                f"sample_weight has {sw_np.shape[0]} entries "
+                f"but X has {X_np.shape[0]} rows."
+            )
+        X_tr, X_val, y_tr, y_val, sw_tr, sw_val = train_test_split(
+            X_np,
+            y_np,
+            sw_np,
+            test_size=val_size,
+            random_state=random_state,
+            stratify=y_np if can_stratify else None,
+        )
+
+    n_tc = None if n_transform_cols is None else int(n_transform_cols)
+    fit_slice = (lambda A: A) if n_tc is None else (lambda A: A[:, :n_tc])
 
     fitted_warper = None
     if warper is not None:
-        fitted_warper = warper.fit(pd.DataFrame(X_tr))
-        X_tr = _warp_numpy(fitted_warper, X_tr)
-        X_val = _warp_numpy(fitted_warper, X_val)
+        fitted_warper = warper.fit(pd.DataFrame(fit_slice(X_tr)))
+        X_tr = _transform_leading_cols(
+            X_tr, n_tc, lambda A: _warp_numpy(fitted_warper, A)
+        )
+        X_val = _transform_leading_cols(
+            X_val, n_tc, lambda A: _warp_numpy(fitted_warper, A)
+        )
 
     if input_transform is None:
         transform_mode = "standardize" if standardize else "none"
     else:
         transform_mode = input_transform
-    transform_state = fit_input_transform(X_tr, transform_mode)
-    X_tr = apply_input_transform(X_tr, transform_state)
-    X_val = apply_input_transform(X_val, transform_state)
+    transform_state = fit_input_transform(fit_slice(X_tr), transform_mode)
+    X_tr = _transform_leading_cols(
+        X_tr, n_tc, lambda A: apply_input_transform(A, transform_state)
+    )
+    X_val = _transform_leading_cols(
+        X_val, n_tc, lambda A: apply_input_transform(A, transform_state)
+    )
 
     mean = transform_state.get("mean")
     std = transform_state.get("std")
 
-    train_ds = SpectralDataset(X_tr, y_tr, standardize=False)
+    train_ds = SpectralDataset(X_tr, y_tr, standardize=False, sample_weight=sw_tr)
     val_ds = SpectralDataset(X_val, y_val, standardize=False)
 
     drop_last = batch_size > 1 and (len(train_ds) % batch_size) == 1
@@ -318,5 +434,6 @@ def make_loaders(
             "std": std,
             "warper": fitted_warper,
             "input_transform_state": transform_state,
+            "sample_weight_val": sw_val,
         },
     )

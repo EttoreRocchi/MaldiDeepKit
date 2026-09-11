@@ -1,10 +1,13 @@
 Base Module
 ===========
 
-Abstract base class and data utilities shared by every MaldiDeepKit
-classifier. Users implementing a new architecture only need to inherit
-from :class:`~maldideepkit.BaseSpectralClassifier` and override
-``_build_model()``.
+Abstract base classes and data utilities shared by every MaldiDeepKit
+classifier. Users implementing a new single-input architecture only
+need to inherit from :class:`~maldideepkit.BaseSpectralClassifier` and
+override ``_build_model()``. Dual-input classifiers (spectrum + a
+per-row side feature) instead subclass
+:class:`~maldideepkit.BaseDualSpectralClassifier` and override
+``_build_dual_model()``.
 
 BaseSpectralClassifier
 ----------------------
@@ -12,6 +15,14 @@ BaseSpectralClassifier
 .. autoclass:: maldideepkit.BaseSpectralClassifier
    :members:
    :inherited-members:
+   :undoc-members:
+   :show-inheritance:
+
+BaseDualSpectralClassifier
+--------------------------
+
+.. autoclass:: maldideepkit.BaseDualSpectralClassifier
+   :members:
    :undoc-members:
    :show-inheritance:
 

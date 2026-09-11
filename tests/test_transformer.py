@@ -224,7 +224,7 @@ class TestMultiHeadSelfAttention:
         torch.testing.assert_close(out_a, out_b, rtol=1e-5, atol=1e-5)
 
     def test_qk_norm_is_on_by_default(self):
-        """QK-norm (``q_norm`` / ``k_norm``) is always on - universal stability knob."""
+        """QK-norm (``q_norm`` / ``k_norm``) is always on (universal stability knob)."""
         attn = MultiHeadSelfAttention(dim=16, num_heads=4)
         assert isinstance(attn.q_norm, torch.nn.LayerNorm)
         assert isinstance(attn.k_norm, torch.nn.LayerNorm)

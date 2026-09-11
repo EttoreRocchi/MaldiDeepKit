@@ -13,6 +13,8 @@ organized by module.
    cnn
    resnet
    transformer
+   dual_branch
+   semisupervised
    blocks
    augment
    uncertainty
@@ -21,14 +23,19 @@ organized by module.
 Base Classes
 ------------
 
-Every classifier inherits from :class:`~maldideepkit.BaseSpectralClassifier`,
-which handles device placement, validation splits, early stopping, and
-persistence. Subclasses only need to override ``_build_model()``.
+Every single-input classifier inherits from
+:class:`~maldideepkit.BaseSpectralClassifier`, which handles device
+placement, validation splits, early stopping, and persistence.
+Subclasses only need to override ``_build_model()``. Dual-input
+classifiers (spectrum + per-row side feature) inherit from
+:class:`~maldideepkit.BaseDualSpectralClassifier`, which extends the
+single-input base with a concatenation-split layout.
 
 .. autosummary::
    :nosignatures:
 
    maldideepkit.BaseSpectralClassifier
+   maldideepkit.BaseDualSpectralClassifier
    maldideepkit.SpectralDataset
    maldideepkit.make_loaders
 
@@ -42,6 +49,8 @@ Classifiers
    maldideepkit.MaldiCNNClassifier
    maldideepkit.MaldiResNetClassifier
    maldideepkit.MaldiTransformerClassifier
+   maldideepkit.MaldiDualBranchClassifier
+   maldideepkit.MaldiSelfTrainingClassifier
 
 Building Blocks
 ---------------

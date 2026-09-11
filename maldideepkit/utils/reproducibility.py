@@ -25,8 +25,8 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
         ``torch.backends.cudnn.benchmark = False``, and
         ``CUBLAS_WORKSPACE_CONFIG=:4096:8``. The env-var must be set
         before the first CUDA context is created. Once enabled,
-        determinism is **sticky** - subsequent plain
-        ``seed_everything(seed)`` calls do not turn it off.
+        determinism is **sticky** (subsequent plain
+        ``seed_everything(seed)`` calls do not turn it off).
     """
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)

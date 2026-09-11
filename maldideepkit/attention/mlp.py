@@ -261,13 +261,19 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         return logits
 
     def fit(  # type: ignore[override]
-        self, X: Any, y: Any, *, warm_start: bool = False
+        self,
+        X: Any,
+        y: Any,
+        *,
+        sample_weight: Any | None = None,
+        warm_start: bool = False,
     ) -> MaldiMLPClassifier:
         """Fit the model and cache attention weights from the final batch.
 
-        See :meth:`BaseSpectralClassifier.fit` for shared parameters, including ``warm_start``.
+        See :meth:`BaseSpectralClassifier.fit` for shared parameters,
+        including ``sample_weight`` and ``warm_start``.
         """
-        super().fit(X, y, warm_start=warm_start)
+        super().fit(X, y, sample_weight=sample_weight, warm_start=warm_start)
         if self.use_attention:
             X_np = _to_numpy(X)
             tail = X_np[: min(len(X_np), 64)]

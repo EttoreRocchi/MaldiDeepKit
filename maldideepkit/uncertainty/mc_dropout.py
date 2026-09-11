@@ -4,7 +4,7 @@ Runs the underlying classifier's forward pass ``n_samples`` times with
 dropout layers kept in training mode. The variance of the resulting
 softmax distribution is interpreted as epistemic uncertainty (model
 disagreement), while the mean of the per-pass entropies is interpreted
-as aleatoric uncertainty (data noise) - following the decomposition in
+as aleatoric uncertainty (data noise), following the decomposition in
 Kendall and Gal (2017).
 """
 

@@ -27,6 +27,14 @@ dependency, available via the ``uncertainty`` extra:
 
    pip install "maldideepkit[uncertainty]"
 
+The :func:`~maldideepkit.smiles_to_fingerprint` helper used by
+:class:`~maldideepkit.MaldiDualBranchClassifier` workflows requires
+RDKit, available via the ``rdkit`` extra:
+
+.. code-block:: bash
+
+   pip install "maldideepkit[rdkit]"
+
 GPU vs. CPU
 -----------
 

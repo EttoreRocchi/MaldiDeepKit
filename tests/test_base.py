@@ -137,9 +137,9 @@ class TestReproducibility:
 class TestRNGDriftInvariants:
     """Regression tests pinning the invariant that classifier / augment
     object construction and fit path setup don't consume global-RNG
-    draws - so that presetting presets, mixing helpers, or extra augment
+    draws (so that presetting presets, mixing helpers, or extra augment
     objects in the preset table cannot accidentally shift the torch
-    global-RNG state mid-sweep.
+    global-RNG state mid-sweep).
     """
 
     def _torch_state(self) -> tuple:
@@ -197,8 +197,8 @@ class TestRNGDriftInvariants:
 
     def test_fit_is_robust_to_prior_global_rng_state(self):
         """Two fits with the same ``random_state`` produce identical outputs
-        regardless of what consumed the global RNG before them - because
-        ``fit()`` re-seeds at entry. This pins the invariant that makes
+        regardless of what consumed the global RNG before them (because
+        ``fit()`` re-seeds at entry). This pins the invariant that makes
         candidate-2 RNG drift (e.g. from preset-table construction)
         irrelevant."""
         X = np.random.RandomState(0).randn(48, 32).astype("float32")
@@ -1119,7 +1119,7 @@ class TestMixupCutmix:
         assert clf.predict(X).shape == (len(X),)
 
     def test_fit_with_both(self, synthetic_binary):
-        """When both are enabled, each batch picks one randomly - both branches must be sound."""
+        """When both are enabled, each batch picks one randomly (both branches must be sound)."""
         X, y = synthetic_binary
         clf = MaldiMLPClassifier(
             hidden_dim=8,

@@ -18,7 +18,7 @@ class FakeMaldiSet:
     """Minimal duck-typed stand-in for ``maldiamrkit.MaldiSet``.
 
     Exposes ``.X`` (DataFrame of binned spectra), ``.y`` (DataFrame),
-    and ``.meta`` - enough for MaldiDeepKit's consumer code.
+    and ``.meta`` (enough for MaldiDeepKit's consumer code).
     """
 
     def __init__(self, X: np.ndarray, y: np.ndarray) -> None:

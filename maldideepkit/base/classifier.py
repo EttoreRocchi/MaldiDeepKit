@@ -51,6 +51,52 @@ def _deserialise_transform_state(
     return out
 
 
+def _classifier_registry() -> dict[str, type]:
+    """Map every exported concrete classifier class by name.
+
+    Built dynamically from :mod:`maldideepkit`'s public exports so
+    :meth:`BaseSpectralClassifier.load` picks up new classifier classes
+    (e.g. :class:`~maldideepkit.MaldiDualBranchClassifier`) without a
+    hand-maintained list.
+    """
+    import maldideepkit
+
+    registry: dict[str, type] = {}
+    for name in maldideepkit.__all__:
+        obj = getattr(maldideepkit, name, None)
+        if (
+            isinstance(obj, type)
+            and issubclass(obj, BaseSpectralClassifier)
+            and not getattr(obj, "__abstractmethods__", frozenset())
+        ):
+            registry[obj.__name__] = obj
+    return registry
+
+
+def _decode_hparams(
+    hparams: dict[str, Any], registry: dict[str, type]
+) -> dict[str, Any]:
+    """Rebuild constructor kwargs from a saved hyperparameter dict.
+
+    Drops the unserialisable ``warping`` placeholder and reconstructs
+    estimator-valued values stored by :meth:`_hparam_dict` as
+    ``{"__estimator__": <class name>, "params": {...}}`` specs
+    (recursively, so a backbone's own estimator params survive too).
+    """
+    hparams.pop("warping", None)
+    for key, value in hparams.items():
+        if isinstance(value, dict) and "__estimator__" in value:
+            sub_name = value["__estimator__"]
+            if sub_name not in registry:
+                raise ValueError(
+                    f"Unknown estimator class {sub_name!r} in saved "
+                    f"hyperparameter {key!r}."
+                )
+            sub_params = _decode_hparams(dict(value["params"]), registry)
+            hparams[key] = registry[sub_name](**sub_params)
+    return hparams
+
+
 class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):  # type: ignore[misc]
     """Abstract base for all MaldiDeepKit classifiers.
 
@@ -209,9 +255,15 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
     n_classes_ : int
         Resolved number of classes.
     feature_mean_ : ndarray or None
-        Per-feature mean used when ``standardize=True``.
+        Per-feature mean fitted on the training split. Populated when
+        ``standardize=True`` or ``input_transform`` includes
+        standardization (``"standardize"`` or ``"log1p+standardize"``);
+        ``None`` otherwise.
     feature_std_ : ndarray or None
-        Per-feature std used when ``standardize=True``.
+        Per-feature standard deviation fitted on the training split.
+        Populated under the same conditions as :attr:`feature_mean_`.
+        For dual-input classifiers both arrays cover the spectrum
+        block only (see :class:`~maldideepkit.BaseDualSpectralClassifier`).
     n_features_in_ : int
         Number of features seen at :meth:`fit` (sklearn convention).
     """
@@ -351,21 +403,48 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             )
         return torch.from_numpy(weights)
 
-    def _build_criterion(self, class_weight: torch.Tensor | None) -> nn.Module:
+    def _build_criterion(
+        self, class_weight: torch.Tensor | None, *, reduction: str = "none"
+    ) -> nn.Module:
         if self.loss == "cross_entropy":
             return nn.CrossEntropyLoss(
                 weight=class_weight,
                 label_smoothing=float(self.label_smoothing),
+                reduction=reduction,
             )
         if self.loss == "focal":
             return FocalLoss(
                 weight=class_weight,
                 gamma=float(self.focal_gamma),
                 label_smoothing=float(self.label_smoothing),
+                reduction=reduction,
             )
         raise ValueError(
             f"Unknown loss={self.loss!r}; expected 'cross_entropy' or 'focal'."
         )
+
+    @staticmethod
+    def _validate_sample_weight(
+        sample_weight: Any, n_samples: int
+    ) -> np.ndarray | None:
+        """Coerce ``sample_weight`` to a validated ``float32`` ndarray.
+
+        Returns ``None`` when the input is ``None``. Otherwise enforces
+        shape ``(n_samples,)``, finite values, and non-negativity, in
+        the spirit of :func:`sklearn.utils.validation._check_sample_weight`.
+        """
+        if sample_weight is None:
+            return None
+        sw = np.asarray(sample_weight, dtype=np.float32).ravel()
+        if sw.shape[0] != n_samples:
+            raise ValueError(
+                f"sample_weight has {sw.shape[0]} entries but X has {n_samples} rows."
+            )
+        if not np.all(np.isfinite(sw)):
+            raise ValueError("sample_weight contains non-finite values (NaN/Inf).")
+        if np.any(sw < 0):
+            raise ValueError("sample_weight must be non-negative.")
+        return sw
 
     def _make_mix_generator(self) -> torch.Generator | None:
         if float(self.mixup_alpha) <= 0 and float(self.cutmix_alpha) <= 0:
@@ -400,7 +479,12 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         return X_np, y_encoded
 
     def fit(
-        self, X: Any, y: Any, *, warm_start: bool = False
+        self,
+        X: Any,
+        y: Any,
+        *,
+        sample_weight: Any | None = None,
+        warm_start: bool = False,
     ) -> BaseSpectralClassifier:
         """Fit the model on ``(X, y)``.
 
@@ -412,6 +496,20 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         y : array-like of shape (n_samples,)
             Integer or string class labels. Re-encoded to ``0..n_classes-1``
             internally; original labels are preserved in :attr:`classes_`.
+        sample_weight : array-like of shape (n_samples,), optional
+            Per-sample weights applied inside the loss. The training
+            batch loss becomes the sklearn-style weighted mean
+            ``sum_i (sw_i * cw_{y_i}) * l_i / sum_i sw_i * cw_{y_i}``,
+            composable with ``class_weight``. Doubling a sample's weight
+            is equivalent to including the row twice. Weights are split
+            alongside ``X`` and ``y`` into the training and validation
+            folds via the same stratified split, and the val-side
+            weights flow into the early-stopping signal, the post-fit
+            AUROC reporting, ``tune_threshold``, ``calibrate_temperature``,
+            and the retry-on-collapse guardrail. Must be non-negative
+            and finite; cast to ``float32``. Under MixUp / CutMix, the
+            weights are convex-combined with the same ``lam`` used to
+            mix labels.
         warm_start : bool, default=False
             When ``True`` and the estimator already has a fitted
             :attr:`model_`, the underlying :class:`torch.nn.Module` is
@@ -434,6 +532,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         """
         seed_everything(int(self.random_state))
         X_np, y_encoded = self._prepare_inputs(X, y)
+        sw_np = self._validate_sample_weight(sample_weight, X_np.shape[0])
         device = self._resolve_device()
 
         warper = clone(self.warping) if self.warping is not None else None
@@ -446,18 +545,33 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             standardize=bool(self.standardize),
             input_transform=self.input_transform,
             warper=warper,
+            sample_weight=sw_np,
+            n_transform_cols=self._n_transform_cols(),
         )
         self.feature_mean_ = stats["mean"]
         self.feature_std_ = stats["std"]
         self.warper_ = stats["warper"]
         self.input_transform_state_ = stats["input_transform_state"]
+        sw_val_np: np.ndarray | None = stats.get("sample_weight_val")
 
         class_weight = self._compute_class_weight(y_encoded)
         if class_weight is not None:
             class_weight = class_weight.to(device)
-        criterion = self._build_criterion(class_weight)
+        # Per-sample losses are only needed when a weighting scheme has
+        # to compose inside the reduction; the fully unweighted path
+        # keeps the criterion's fused mean reduction (a scalar loss is
+        # passed through unchanged by ``_weighted_loss_reduce``).
+        needs_per_sample = sw_np is not None or class_weight is not None
+        criterion = self._build_criterion(
+            class_weight, reduction="none" if needs_per_sample else "mean"
+        )
 
         X_val_t, y_val_t = self._collect_validation(val_loader, device)
+        sw_val_t: torch.Tensor | None = (
+            None
+            if sw_val_np is None
+            else torch.from_numpy(np.asarray(sw_val_np, dtype=np.float32)).to(device)
+        )
 
         # Retry-on-collapse: when ``retry_on_val_auroc_below`` is set,
         # reseed and retrain up to ``max_retries`` more times if the
@@ -511,14 +625,14 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             )
 
             metrics_recorder = self._build_metrics_recorder(
-                model, train_loader, X_val_t, y_val_t, device
+                model, train_loader, X_val_t, y_val_t, device, sw_val_t
             )
 
             early = EarlyStopping(patience=int(self.early_stopping_patience))
             fitted_model = train_loop(
                 model,
                 train_loader,
-                (X_val_t, y_val_t),
+                (X_val_t, y_val_t, sw_val_t),
                 criterion,
                 optimizer,
                 scheduler,
@@ -548,12 +662,14 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
                 ema_decay=(
                     float(self.ema_decay) if self.ema_decay is not None else None
                 ),
+                class_weight_t=class_weight,
+                n_augment_cols=self._n_transform_cols(),
             )
 
             if retry_threshold is None or attempt == total_attempts - 1:
                 break
             final_val_auroc = self._attempt_val_auroc(
-                fitted_model, X_val_t, y_val_t, device
+                fitted_model, X_val_t, y_val_t, device, sw_val_t
             )
             if not np.isfinite(final_val_auroc) or final_val_auroc >= float(
                 retry_threshold
@@ -566,10 +682,10 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         self.temperature_ = None
 
         if self.metrics_log_path is not None:
-            self._write_post_fit_sidecar(X_val_t, y_val_t)
+            self._write_post_fit_sidecar(X_val_t, y_val_t, sw_val_t)
 
         if bool(self.tune_threshold) or bool(self.calibrate_temperature):
-            self._fit_post_hoc_calibration(X_val_t, y_val_t)
+            self._fit_post_hoc_calibration(X_val_t, y_val_t, sw_val_t)
 
         return self
 
@@ -579,6 +695,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         X_val: torch.Tensor,
         y_val: torch.Tensor,
         device: torch.device,
+        sample_weight: torch.Tensor | None = None,
     ) -> float:
         """Return binary val AUROC of a freshly-fitted model, or NaN.
 
@@ -594,12 +711,18 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         y_np = y_val.detach().cpu().numpy()
         if probs.shape[1] != 2 or len(np.unique(y_np)) < 2:
             return float("nan")
+        sw_np = None if sample_weight is None else sample_weight.detach().cpu().numpy()
         try:
-            return float(roc_auc_score(y_np, probs[:, 1]))
+            return float(roc_auc_score(y_np, probs[:, 1], sample_weight=sw_np))
         except ValueError:
             return float("nan")
 
-    def _write_post_fit_sidecar(self, X_val: torch.Tensor, y_val: torch.Tensor) -> None:
+    def _write_post_fit_sidecar(
+        self,
+        X_val: torch.Tensor,
+        y_val: torch.Tensor,
+        sample_weight: torch.Tensor | None = None,
+    ) -> None:
         """Compute val loss + AUROC on the deployed model and write a JSON sidecar."""
         from sklearn.metrics import roc_auc_score
 
@@ -611,17 +734,32 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             logits = self.model_(X_val)
             probs = torch.softmax(logits, dim=-1).detach().cpu().numpy()
             y_np = y_val.detach().cpu().numpy()
-            ce = nn.CrossEntropyLoss()(logits, y_val)
-            val_loss = float(ce.item())
+            per_sample = nn.CrossEntropyLoss(reduction="none")(logits, y_val)
+            if sample_weight is None:
+                val_loss = float(per_sample.mean().item())
+            else:
+                sw_t = sample_weight.to(
+                    dtype=per_sample.dtype, device=per_sample.device
+                )
+                val_loss = float(
+                    ((sw_t * per_sample).sum() / sw_t.sum().clamp_min(1e-12)).item()
+                )
 
+        sw_np = None if sample_weight is None else sample_weight.detach().cpu().numpy()
         val_auroc: float | None = None
         n_classes = probs.shape[1]
         try:
             if n_classes == 2:
-                val_auroc = float(roc_auc_score(y_np, probs[:, 1]))
+                val_auroc = float(roc_auc_score(y_np, probs[:, 1], sample_weight=sw_np))
             else:
                 val_auroc = float(
-                    roc_auc_score(y_np, probs, multi_class="ovr", average="macro")
+                    roc_auc_score(
+                        y_np,
+                        probs,
+                        multi_class="ovr",
+                        average="macro",
+                        sample_weight=sw_np,
+                    )
                 )
         except ValueError:
             pass
@@ -648,6 +786,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         X_val_t: torch.Tensor,
         y_val_t: torch.Tensor,
         device: torch.device,
+        sw_val_t: torch.Tensor | None = None,
     ) -> Callable[[dict[str, float]], None] | None:
         """Return a per-epoch recorder that appends diagnostics to a CSV.
 
@@ -664,6 +803,10 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         track_train = bool(self.track_train_metrics)
         binary = self.n_classes_ == 2
 
+        sw_val_np_recorder = (
+            None if sw_val_t is None else sw_val_t.detach().cpu().numpy()
+        )
+
         def _collect_train_val_auroc() -> tuple[float, float]:
             from sklearn.metrics import roc_auc_score
 
@@ -674,9 +817,17 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             y_val_np = y_val_t.detach().cpu().numpy()
             y_tr_parts: list[np.ndarray] = []
             proba_tr_parts: list[np.ndarray] = []
+            sw_tr_parts: list[np.ndarray] = []
+            has_sw = False
             model.eval()
             with torch.no_grad():
-                for xb, yb in train_loader:
+                for batch in train_loader:
+                    if len(batch) == 3:
+                        xb, yb, wb = batch
+                        has_sw = True
+                        sw_tr_parts.append(np.asarray(wb).ravel())
+                    else:
+                        xb, yb = batch
                     xb = xb.to(device, non_blocking=True)
                     logits = model(xb).detach()
                     proba = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
@@ -687,12 +838,17 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             model.train()
             y_tr = np.concatenate(y_tr_parts)
             proba_tr = np.concatenate(proba_tr_parts)
+            sw_tr_arr = np.concatenate(sw_tr_parts) if has_sw else None
             try:
-                train_auroc = float(roc_auc_score(y_tr, proba_tr))
+                train_auroc = float(
+                    roc_auc_score(y_tr, proba_tr, sample_weight=sw_tr_arr)
+                )
             except ValueError:
                 train_auroc = float("nan")
             try:
-                val_auroc = float(roc_auc_score(y_val_np, val_proba))
+                val_auroc = float(
+                    roc_auc_score(y_val_np, val_proba, sample_weight=sw_val_np_recorder)
+                )
             except ValueError:
                 val_auroc = float("nan")
             return train_auroc, val_auroc
@@ -725,7 +881,10 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         return recorder
 
     def _fit_post_hoc_calibration(
-        self, X_val_t: torch.Tensor, y_val_t: torch.Tensor
+        self,
+        X_val_t: torch.Tensor,
+        y_val_t: torch.Tensor,
+        sample_weight: torch.Tensor | None = None,
     ) -> None:
         """Collect held-out logits once, then fit threshold / temperature."""
         from ..utils.calibration import fit_temperature, tune_threshold
@@ -734,9 +893,14 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         with torch.no_grad():
             val_logits = self.model_(X_val_t).detach().cpu()
         y_val_np = y_val_t.detach().cpu().numpy()
+        sw_val_np = (
+            None if sample_weight is None else sample_weight.detach().cpu().numpy()
+        )
 
         if bool(self.calibrate_temperature):
-            self.temperature_ = float(fit_temperature(val_logits, y_val_np))
+            self.temperature_ = float(
+                fit_temperature(val_logits, y_val_np, sample_weight=sw_val_np)
+            )
 
         if bool(self.tune_threshold):
             if self.n_classes_ != 2:
@@ -751,14 +915,19 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
                 exp = np.exp(logits_np)
                 proba = exp / exp.sum(axis=1, keepdims=True)
                 try:
-                    val_auroc = float(roc_auc_score(y_val_np, proba[:, 1]))
+                    val_auroc = float(
+                        roc_auc_score(y_val_np, proba[:, 1], sample_weight=sw_val_np)
+                    )
                 except ValueError:
                     val_auroc = float("nan")
                 gate = float(self.min_val_auroc_for_threshold_tune)
                 if np.isfinite(val_auroc) and val_auroc >= gate:
                     self.threshold_ = float(
                         tune_threshold(
-                            y_val_np, proba[:, 1], metric=self.threshold_metric
+                            y_val_np,
+                            proba[:, 1],
+                            metric=self.threshold_metric,
+                            sample_weight=sw_val_np,
                         )
                     )
                 else:
@@ -784,6 +953,18 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         y_val = torch.cat(ys, dim=0).to(device)
         return X_val, y_val
 
+    def _n_transform_cols(self) -> int | None:
+        """Return how many leading columns spectrum preprocessing applies to.
+
+        ``None`` (the default) means "every column", which is correct
+        for single-input classifiers. Dual-input subclasses override
+        this to return their spectrum width so that ``warping``,
+        ``standardize``, ``input_transform``, ``augment`` and CutMix
+        never touch the packed side-feature block. See
+        :class:`~maldideepkit.BaseDualSpectralClassifier`.
+        """
+        return None
+
     def _check_input_dim(self, X: np.ndarray) -> None:
         if X.shape[1] != self.input_dim_:
             raise ValueError(
@@ -792,24 +973,56 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
                 "to match the original resolution."
             )
 
-    def _forward_logits(self, X: Any) -> np.ndarray:
-        check_is_fitted(self, "model_")
+    def _preprocess_input(self, X: Any) -> np.ndarray:
+        """Apply the fitted inference-time preprocessing chain to ``X``.
+
+        Runs optional spectral warping, the fitted ``input_transform``
+        state, and the legacy ``standardize`` path (each confined to
+        the leading :meth:`_n_transform_cols` columns so dual-input
+        models never transform their packed side block). This is the
+        single source of truth for inference preprocessing: both
+        :meth:`_forward_logits` and the estimators in
+        :mod:`maldideepkit.uncertainty` go through it.
+
+        Parameters
+        ----------
+        X : array-like or MaldiSet of shape (n_samples, n_bins)
+            Raw input spectra (plus packed side features for
+            dual-input models).
+
+        Returns
+        -------
+        ndarray of shape (n_samples, n_bins)
+            Preprocessed feature matrix as ``float32``.
+        """
         X_np = _to_numpy(X)
         self._check_input_dim(X_np)
+        n_tc = self._n_transform_cols()
         if getattr(self, "warper_", None) is not None:
-            from .data import _warp_numpy
+            from .data import _transform_leading_cols, _warp_numpy
 
-            X_np = _warp_numpy(self.warper_, X_np)
+            X_np = _transform_leading_cols(
+                X_np, n_tc, lambda A: _warp_numpy(self.warper_, A)
+            )
         state = getattr(self, "input_transform_state_", None)
         if state is not None and state.get("mode", "none") != "none":
-            from .data import apply_input_transform
+            from .data import _transform_leading_cols, apply_input_transform
 
-            X_np = apply_input_transform(X_np, state)
-        elif self.standardize and self.feature_mean_ is not None:
-            from .data import _STD_FLOOR
+            X_np = _transform_leading_cols(
+                X_np, n_tc, lambda A: apply_input_transform(A, state)
+            )
+        elif self.standardize and getattr(self, "feature_mean_", None) is not None:
+            from .data import _STD_FLOOR, _transform_leading_cols
 
             safe_std = np.maximum(self.feature_std_, _STD_FLOOR).astype(np.float32)
-            X_np = (X_np - self.feature_mean_) / safe_std
+            X_np = _transform_leading_cols(
+                X_np, n_tc, lambda A: (A - self.feature_mean_) / safe_std
+            )
+        return X_np.astype(np.float32, copy=False)
+
+    def _forward_logits(self, X: Any) -> np.ndarray:
+        check_is_fitted(self, "model_")
+        X_np = self._preprocess_input(X)
         device = self._device_
         self.model_.eval()
         # Batch inference so large test folds don't OOM on attention
@@ -911,6 +1124,14 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         if isinstance(params.get("class_weight"), np.ndarray):
             params["class_weight"] = params["class_weight"].tolist()
         params["warping"] = None if params.get("warping") is None else "<provided>"
+        for key, value in params.items():
+            if isinstance(value, BaseSpectralClassifier):
+                # Estimator-valued hyperparameters (e.g. the dual-branch
+                # ``backbone``) are stored as a reconstructable spec.
+                params[key] = {
+                    "__estimator__": type(value).__name__,
+                    "params": value._hparam_dict(),
+                }
         return params
 
     def save(self, path: str | Path) -> None:
@@ -1014,30 +1235,14 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
                 f"on {cls.__name__!r}."
             )
 
+        registry = _classifier_registry()
         target_cls = cls
         if cls is BaseSpectralClassifier:
-            from .. import (
-                MaldiCNNClassifier,
-                MaldiMLPClassifier,
-                MaldiResNetClassifier,
-                MaldiTransformerClassifier,
-            )
-
-            registry = {
-                c.__name__: c
-                for c in (
-                    MaldiMLPClassifier,
-                    MaldiCNNClassifier,
-                    MaldiResNetClassifier,
-                    MaldiTransformerClassifier,
-                )
-            }
             if meta["class_name"] not in registry:
                 raise ValueError(f"Unknown saved class: {meta['class_name']!r}")
             target_cls = registry[meta["class_name"]]
 
-        hparams = dict(meta["hparams"])
-        hparams.pop("warping", None)
+        hparams = _decode_hparams(dict(meta["hparams"]), registry)
         instance = target_cls(**hparams)
         fitted = meta["fitted"]
         instance.input_dim_ = int(fitted["input_dim_"])

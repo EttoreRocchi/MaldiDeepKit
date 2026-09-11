@@ -18,6 +18,7 @@ def tune_threshold(
     y_true: np.ndarray,
     y_proba: np.ndarray,
     metric: str = "balanced_accuracy",
+    sample_weight: np.ndarray | None = None,
 ) -> float:
     """Pick the binary decision threshold that maximises ``metric``.
 
@@ -35,6 +36,9 @@ def tune_threshold(
         given, column index ``1`` is used.
     metric : {"balanced_accuracy", "f1", "youden"}, default="balanced_accuracy"
         Which metric to maximise. ``"youden"`` = TPR - FPR.
+    sample_weight : array-like of shape (n_samples,), optional
+        Per-sample weights forwarded to the underlying sklearn metric
+        (``balanced_accuracy_score``, ``f1_score``, ``roc_curve``).
 
     Returns
     -------
@@ -51,9 +55,14 @@ def tune_threshold(
             )
         y_proba_arr = y_proba_arr[:, 1]
     y_proba_arr = y_proba_arr.ravel()
+    sw = (
+        None
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=float).ravel()
+    )
 
     if metric == "youden":
-        fpr, tpr, thr = roc_curve(y_true, y_proba_arr)
+        fpr, tpr, thr = roc_curve(y_true, y_proba_arr, sample_weight=sw)
         valid = (thr > 0) & (thr < 1)
         if not valid.any():
             return 0.5
@@ -72,9 +81,9 @@ def tune_threshold(
     for t in candidates:
         pred = (y_proba_arr >= t).astype(int)
         if metric == "balanced_accuracy":
-            score = balanced_accuracy_score(y_true, pred)
+            score = balanced_accuracy_score(y_true, pred, sample_weight=sw)
         elif metric == "f1":
-            score = f1_score(y_true, pred, zero_division=0)
+            score = f1_score(y_true, pred, zero_division=0, sample_weight=sw)
         else:
             raise ValueError(
                 f"Unknown metric={metric!r}; "
@@ -90,6 +99,7 @@ def fit_temperature(
     y_true: torch.Tensor | np.ndarray,
     max_iter: int = 200,
     lr: float = 1e-1,
+    sample_weight: torch.Tensor | np.ndarray | None = None,
 ) -> float:
     """Fit a scalar temperature by LBFGS minimisation of NLL.
 
@@ -107,6 +117,9 @@ def fit_temperature(
         LBFGS max iterations.
     lr : float, default=1e-1
         LBFGS step size.
+    sample_weight : torch.Tensor or ndarray of shape (n_samples,), optional
+        Per-sample weights. When given, the NLL minimised by LBFGS
+        becomes ``sum_i sw_i * ce_i / sum_i sw_i``.
 
     Returns
     -------
@@ -120,13 +133,30 @@ def fit_temperature(
     else:
         y_true = y_true.to(torch.long).view(-1)
 
+    sw_t: torch.Tensor | None
+    if sample_weight is None:
+        sw_t = None
+    else:
+        if isinstance(sample_weight, torch.Tensor):
+            sw_t = sample_weight.to(dtype=torch.float32, device=logits.device).view(-1)
+        else:
+            sw_t = torch.as_tensor(
+                np.asarray(sample_weight, dtype=np.float32).ravel(),
+                dtype=torch.float32,
+                device=logits.device,
+            )
+
     log_temperature = torch.zeros(1, device=logits.device, requires_grad=True)
     optimizer = torch.optim.LBFGS([log_temperature], lr=lr, max_iter=max_iter)
 
     def _closure():
         optimizer.zero_grad()
         t = torch.exp(log_temperature)
-        loss = F.cross_entropy(logits / t, y_true)
+        if sw_t is None:
+            loss = F.cross_entropy(logits / t, y_true)
+        else:
+            per_sample = F.cross_entropy(logits / t, y_true, reduction="none")
+            loss = (sw_t * per_sample).sum() / sw_t.sum().clamp_min(1e-12)
         loss.backward()
         return loss
 

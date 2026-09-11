@@ -51,6 +51,8 @@ dependencies = {file = ["requirements.txt"]}
 dev = {file = ["requirements-dev.txt"]}
 docs = {file = ["requirements-docs.txt"]}
 uncertainty = {file = ["requirements-uncertainty.txt"]}
+rdkit = {file = ["requirements-rdkit.txt"]}
+all = {file = ["requirements-all.txt"]}
 
 [tool.setuptools.packages.find]
 where = ["."]

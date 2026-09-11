@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
 from ..augment.mixing import apply_cutmix, apply_mixup, to_one_hot
+from .loss import _gather_cw_per_sample, _weighted_loss_reduce
 from .sam import SAMOptimizer
 
 
@@ -91,7 +93,8 @@ class EarlyStopping:
 def train_loop(
     model: nn.Module,
     train_loader: DataLoader,
-    val_tensors: tuple[torch.Tensor, torch.Tensor],
+    val_tensors: tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None],
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler
@@ -114,6 +117,8 @@ def train_loop(
     n_classes: int | None = None,
     mix_generator: torch.Generator | None = None,
     ema_decay: float | None = None,
+    class_weight_t: torch.Tensor | None = None,
+    n_augment_cols: int | None = None,
 ) -> nn.Module:
     """Run a classic train + validate loop with early stopping.
 
@@ -189,12 +194,35 @@ def train_loop(
         model parameters: ``ema = decay * ema + (1 - decay) * model``.
         Typical values ``0.99``-``0.9999``. At end of training the
         EMA weights overwrite the base model.
+    class_weight_t : torch.Tensor or None, default=None
+        Per-class weight tensor (already moved to ``device``). When
+        provided, it is used solely for the denominator gather in the
+        weighted-mean reduction so that the sklearn convention
+        "doubling sample_weight is equivalent to duplicating the row"
+        composes correctly with class_weight. The actual per-class
+        scaling of the per-sample loss is expected to be applied by
+        ``criterion`` itself (e.g. via ``nn.CrossEntropyLoss(weight=...)``).
+        ``criterion`` should be built with ``reduction='none'``; a
+        mean- or sum-reduced criterion is accepted and its scalar loss
+        used as-is (it has already performed its own class-weighted
+        reduction), except when ``sample_weight`` batches are present,
+        where per-sample losses are required and a scalar raises a
+        :class:`ValueError`.
+    n_augment_cols : int or None, default=None
+        Number of leading spectrum columns in each batch. When given
+        (dual-input models, whose batch is ``[ X_spec | X_side ]``),
+        ``augment`` is applied to the spectrum block only and CutMix
+        draws its window inside that block, so spectrum-shaped
+        perturbations never reach the packed side features. MixUp is
+        unaffected: it already convex-combines every column with a
+        single shared ``lam``, which stays consistent with the mixed
+        label. ``None`` treats every column as spectrum.
 
     Returns
     -------
     nn.Module
         The input ``model`` with the best-validation weights loaded
-        (or the EMA / SWA average when those are enabled - precedence
+        (or the EMA / SWA average when those are enabled: precedence
         EMA > SWA > best_val).
     """
     mix_enabled = mixup_alpha > 0.0 or cutmix_alpha > 0.0
@@ -211,7 +239,11 @@ def train_loop(
             "in FP32 (no AMP speedup). Disable one to silence.",
             stacklevel=2,
         )
-    X_val, y_val = val_tensors
+    if len(val_tensors) == 3:
+        X_val, y_val, sw_val_t = val_tensors  # type: ignore[misc]
+    else:
+        X_val, y_val = val_tensors  # type: ignore[misc]
+        sw_val_t = None
     base_lrs = [pg["lr"] for pg in optimizer.param_groups]
     amp_enabled = bool(use_amp) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
@@ -247,11 +279,21 @@ def train_loop(
         epoch_n_updates = 0
 
         model.train()
-        for xb, yb in train_loader:
+        for batch in train_loader:
+            if len(batch) == 3:
+                xb, yb, sw_b = batch
+                sw_b = sw_b.to(device, non_blocking=True)
+            else:
+                xb, yb = batch
+                sw_b = None
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             if augment is not None:
-                xb = augment(xb)
+                if n_augment_cols is None or int(n_augment_cols) >= xb.shape[1]:
+                    xb = augment(xb)
+                else:
+                    n_aug = int(n_augment_cols)
+                    xb = torch.cat([augment(xb[:, :n_aug]), xb[:, n_aug:]], dim=1)
 
             if mix_enabled:
                 yb_oh = to_one_hot(yb, int(n_classes))
@@ -259,16 +301,33 @@ def train_loop(
                     mixup_alpha == 0.0
                     or torch.rand(1, generator=mix_generator).item() < 0.5
                 )
+                mix_kwargs: dict[str, Any] = {"generator": mix_generator}
                 if use_cutmix:
-                    xb, yb_target = apply_cutmix(
-                        xb, yb_oh, cutmix_alpha, generator=mix_generator
+                    mix_fn = apply_cutmix
+                    mix_alpha = cutmix_alpha
+                    mix_kwargs["n_spec_cols"] = n_augment_cols
+                else:
+                    mix_fn = apply_mixup
+                    mix_alpha = mixup_alpha
+                if sw_b is not None:
+                    xb, yb_target, sw_b = mix_fn(  # type: ignore[misc]
+                        xb, yb_oh, mix_alpha, sample_weight=sw_b, **mix_kwargs
                     )
                 else:
-                    xb, yb_target = apply_mixup(
-                        xb, yb_oh, mixup_alpha, generator=mix_generator
+                    xb, yb_target = mix_fn(  # type: ignore[misc]
+                        xb, yb_oh, mix_alpha, **mix_kwargs
                     )
             else:
                 yb_target = yb
+
+            cw_per_sample = _gather_cw_per_sample(yb_target, class_weight_t)
+
+            def _reduce(
+                per_sample: torch.Tensor,
+                _sw: torch.Tensor | None = sw_b,
+                _cw: torch.Tensor | None = cw_per_sample,
+            ) -> torch.Tensor:
+                return _weighted_loss_reduce(per_sample, _sw, _cw)
 
             if use_sam:
                 if not isinstance(optimizer, SAMOptimizer):
@@ -278,12 +337,12 @@ def train_loop(
                     )
                 optimizer.zero_grad()
                 logits = model(xb)
-                loss = criterion(logits, yb_target)
+                loss = _reduce(criterion(logits, yb_target))
                 loss.backward()
                 optimizer.first_step(zero_grad=True)
 
                 logits = model(xb)
-                loss = criterion(logits, yb_target)
+                loss = _reduce(criterion(logits, yb_target))
                 loss.backward()
                 if metrics_recorder is not None or grad_clip_norm is not None:
                     params = [p for g in optimizer.param_groups for p in g["params"]]
@@ -297,7 +356,8 @@ def train_loop(
                 optimizer.zero_grad()
                 with torch.autocast(device_type="cuda"):
                     logits = model(xb)
-                    loss = criterion(logits, yb_target)
+                    per_sample = criterion(logits, yb_target)
+                loss = _reduce(per_sample.float())
                 scaler.scale(loss).backward()
                 if grad_clip_norm is not None or metrics_recorder is not None:
                     scaler.unscale_(optimizer)
@@ -311,7 +371,7 @@ def train_loop(
             else:
                 optimizer.zero_grad()
                 logits = model(xb)
-                loss = criterion(logits, yb_target)
+                loss = _reduce(criterion(logits, yb_target))
                 loss.backward()
                 if metrics_recorder is not None or grad_clip_norm is not None:
                     params = [p for g in optimizer.param_groups for p in g["params"]]
@@ -330,14 +390,25 @@ def train_loop(
                 epoch_n_updates += 1
 
         model.eval()
+        val_cw_per_sample = _gather_cw_per_sample(y_val, class_weight_t)
         with torch.no_grad():
             if amp_enabled:
                 with torch.autocast(device_type="cuda"):
                     val_logits = model(X_val)
-                    val_loss = float(criterion(val_logits, y_val).item())
+                    val_per_sample = criterion(val_logits, y_val)
+                val_loss = float(
+                    _weighted_loss_reduce(
+                        val_per_sample.float(), sw_val_t, val_cw_per_sample
+                    ).item()
+                )
             else:
                 val_logits = model(X_val)
-                val_loss = float(criterion(val_logits, y_val).item())
+                val_per_sample = criterion(val_logits, y_val)
+                val_loss = float(
+                    _weighted_loss_reduce(
+                        val_per_sample, sw_val_t, val_cw_per_sample
+                    ).item()
+                )
 
         if scheduler is not None and epoch >= warmup_epochs:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):

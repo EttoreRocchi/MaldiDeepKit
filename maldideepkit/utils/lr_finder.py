@@ -82,6 +82,8 @@ def find_lr(
         val_size=float(classifier.val_fraction),
         random_state=int(classifier.random_state),
         standardize=bool(classifier.standardize),
+        input_transform=classifier.input_transform,
+        n_transform_cols=classifier._n_transform_cols(),
     )
     classifier.feature_mean_ = stats["mean"]
     classifier.feature_std_ = stats["std"]

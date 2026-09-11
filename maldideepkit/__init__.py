@@ -6,16 +6,23 @@ a scikit-learn compatible estimator with sensible defaults.
 
 Subpackages
 -----------
-- ``maldideepkit.base`` - ``BaseSpectralClassifier``, ``SpectralDataset``,
-  ``make_loaders``.
+- ``maldideepkit.base`` - ``BaseSpectralClassifier``,
+  ``BaseDualSpectralClassifier``, ``SpectralDataset``, ``make_loaders``.
 - ``maldideepkit.attention`` - ``MaldiMLPClassifier`` (MLP with optional
   sigmoid-gated attention).
 - ``maldideepkit.cnn`` - ``MaldiCNNClassifier`` (Conv1D blocks).
 - ``maldideepkit.resnet`` - ``MaldiResNetClassifier`` (1-D ResNet-18).
 - ``maldideepkit.transformer`` - ``MaldiTransformerClassifier`` (1-D ViT).
+- ``maldideepkit.dual_branch`` - ``MaldiDualBranchClassifier``
+  (spectrum + per-row side feature) and ``smiles_to_fingerprint``
+  helper (requires the ``[rdkit]`` extra).
+- ``maldideepkit.semisupervised`` - ``MaldiSelfTrainingClassifier``
+  (iterative pseudo-labeling meta-classifier).
 - ``maldideepkit.blocks`` - re-exports of every backbone and
   composable primitive for users embedding components into their own
   networks.
+- ``maldideepkit.augment`` - per-batch training-time augmentations
+  (``SpectrumAugment``, MixUp / CutMix helpers).
 - ``maldideepkit.utils`` - reproducibility helpers and shared
   training primitives.
 - ``maldideepkit.uncertainty`` - uncertainty-quantification
@@ -38,22 +45,29 @@ from . import uncertainty
 from .attention.mlp import MaldiMLPClassifier
 from .base.classifier import BaseSpectralClassifier
 from .base.data import SpectralDataset, make_loaders
+from .base.dual import BaseDualSpectralClassifier
 from .cnn.cnn import MaldiCNNClassifier
+from .dual_branch import MaldiDualBranchClassifier, smiles_to_fingerprint
 from .resnet.resnet import MaldiResNetClassifier
+from .semisupervised import MaldiSelfTrainingClassifier
 from .transformer.transformer import MaldiTransformerClassifier
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Ettore Rocchi"
 
 __all__ = [
+    "BaseDualSpectralClassifier",
     "BaseSpectralClassifier",
     "MaldiCNNClassifier",
+    "MaldiDualBranchClassifier",
     "MaldiMLPClassifier",
     "MaldiResNetClassifier",
+    "MaldiSelfTrainingClassifier",
     "MaldiTransformerClassifier",
     "SpectralDataset",
     "__author__",
     "__version__",
     "make_loaders",
+    "smiles_to_fingerprint",
     "uncertainty",
 ]

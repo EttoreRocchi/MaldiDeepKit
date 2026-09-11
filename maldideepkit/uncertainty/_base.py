@@ -9,7 +9,6 @@ import numpy as np
 from sklearn.utils.validation import check_is_fitted
 
 from ..base.classifier import BaseSpectralClassifier
-from ..base.data import _to_numpy
 from ._result import UncertaintyResult
 
 
@@ -18,13 +17,13 @@ def _apply_classifier_preprocessing(
 ) -> np.ndarray:
     """Apply the classifier's full inference-time preprocessing to ``X``.
 
-    Mirrors the preprocessing performed inside
-    :meth:`BaseSpectralClassifier._forward_logits` exactly: optional
+    Delegates to :meth:`BaseSpectralClassifier._preprocess_input`, the
+    single source of truth for inference preprocessing (optional
     spectral warping, the fitted ``input_transform`` state, and the
-    legacy ``standardize`` path used when no modern input transform is
-    set. Replicating it here lets uncertainty estimators feed data
-    through ``classifier.model_`` directly without going through the
-    eval-only ``_forward_logits`` shortcut.
+    legacy ``standardize`` path), so uncertainty estimators feed data
+    through ``classifier.model_`` on inputs identical to what
+    ``predict_proba`` sees (including dual-input models, whose
+    preprocessing is confined to the spectrum columns).
 
     Parameters
     ----------
@@ -38,26 +37,7 @@ def _apply_classifier_preprocessing(
     ndarray of shape (n_samples, n_bins)
         Preprocessed feature matrix as ``float32``.
     """
-    X_np = _to_numpy(X)
-    classifier._check_input_dim(X_np)
-    if getattr(classifier, "warper_", None) is not None:
-        from ..base.data import _warp_numpy
-
-        X_np = _warp_numpy(classifier.warper_, X_np)
-    state = getattr(classifier, "input_transform_state_", None)
-    if state is not None and state.get("mode", "none") != "none":
-        from ..base.data import apply_input_transform
-
-        X_np = apply_input_transform(X_np, state)
-    elif (
-        classifier.standardize
-        and getattr(classifier, "feature_mean_", None) is not None
-    ):
-        from ..base.data import _STD_FLOOR
-
-        safe_std = np.maximum(classifier.feature_std_, _STD_FLOOR).astype(np.float32)
-        X_np = (X_np - classifier.feature_mean_) / safe_std
-    return X_np.astype(np.float32, copy=False)
+    return classifier._preprocess_input(X)
 
 
 class BaseUncertaintyEstimator(metaclass=ABCMeta):

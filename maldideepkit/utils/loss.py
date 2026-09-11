@@ -7,6 +7,86 @@ import torch.nn.functional as F
 from torch import nn
 
 
+def _gather_cw_per_sample(
+    target: torch.Tensor,
+    class_weight: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Return per-sample effective class weight for loss reduction.
+
+    For integer targets returns ``class_weight[y_i]``; for soft targets
+    (one-hot blended by MixUp / CutMix) returns ``sum_c t_c * w_c``.
+
+    Used as the denominator in :func:`_weighted_loss_reduce` so that the
+    sklearn convention "doubling ``sample_weight`` is equivalent to
+    duplicating the row" composes correctly with ``class_weight``.
+
+    Returns ``None`` when ``class_weight`` is ``None``.
+    """
+    if class_weight is None:
+        return None
+    if target.dim() == 2:
+        weights = class_weight.to(dtype=target.dtype, device=target.device)
+        return (target * weights.unsqueeze(0)).sum(dim=-1)
+    return class_weight.to(device=target.device).gather(0, target.long())
+
+
+def _weighted_loss_reduce(
+    per_sample: torch.Tensor,
+    sample_weight: torch.Tensor | None,
+    cw_per_sample: torch.Tensor | None,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Reduce a ``(B,)`` per-sample loss tensor to a scalar.
+
+    Matches the four canonical cases:
+
+    - ``sample_weight=None``, ``cw_per_sample=None``: plain mean
+      (equivalent to ``nn.CrossEntropyLoss(reduction='mean')``).
+    - ``sample_weight=None``, ``cw_per_sample`` given:
+      ``per_sample.sum() / cw_per_sample.sum()`` (matches PyTorch's
+      class-weighted mean reduction).
+    - ``sample_weight`` given, ``cw_per_sample=None``:
+      ``(sw * l).sum() / sw.sum()`` (sklearn ``sample_weight`` semantics).
+    - both given: ``(sw * l).sum() / (sw * cw).sum()`` (sklearn-compatible
+      composition: doubling a sample's weight is equivalent to duplicating
+      the row).
+
+    Assumes ``per_sample`` already incorporates any per-class weighting
+    that the criterion applied internally (true for both
+    :class:`torch.nn.CrossEntropyLoss` and :class:`FocalLoss` with
+    ``weight=...``).
+
+    A 0-d ``per_sample`` (a criterion built with ``reduction='mean'``
+    or ``'sum'``) is passed through unchanged when ``sample_weight`` is
+    ``None``: such a criterion has already performed its own
+    (class-weighted) reduction, so dividing again would silently shrink
+    the loss by roughly the batch size. When ``sample_weight`` is given
+    a 0-d loss is an error: per-sample weighting needs the criterion to
+    be built with ``reduction='none'``.
+    """
+    if per_sample.dim() == 0:
+        if sample_weight is not None:
+            raise ValueError(
+                "sample_weight requires a per-sample loss vector, but the "
+                "criterion returned a scalar - build it with "
+                "reduction='none' (e.g. nn.CrossEntropyLoss("
+                "reduction='none'))."
+            )
+        return per_sample
+    if sample_weight is None and cw_per_sample is None:
+        return per_sample.mean()
+    if sample_weight is None:
+        denom = cw_per_sample.sum().clamp_min(eps)
+        return per_sample.sum() / denom
+    sw = sample_weight.to(dtype=per_sample.dtype, device=per_sample.device)
+    if cw_per_sample is None:
+        denom = sw.sum().clamp_min(eps)
+        return (sw * per_sample).sum() / denom
+    cw_s = cw_per_sample.to(dtype=per_sample.dtype, device=per_sample.device)
+    denom = (sw * cw_s).sum().clamp_min(eps)
+    return (sw * per_sample).sum() / denom
+
+
 class FocalLoss(nn.Module):
     r"""Multi-class focal loss with optional class weighting and label smoothing.
 

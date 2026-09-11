@@ -86,7 +86,7 @@ This is **empirical observation, not a priori design**. The defaults
 were picked for the local-vs-global balance first; the alignment with
 DRIAMS peak widths emerged from the measurement above. Different
 instruments, different preprocessing, or different bin widths will
-shift the distribution - use :meth:`from_spectrum` to scale.
+shift the distribution (use :meth:`from_spectrum` to scale).
 
 The semantic split
 ------------------
@@ -226,5 +226,5 @@ whose input width scales linearly with ``input_dim``. Given four
 ``128 * input_dim / 16``. For ``input_dim=6000`` this is already
 48,000 units; at ``input_dim=18000`` it grows to 144,000. If this
 matters, prefer :class:`~maldideepkit.MaldiResNetClassifier` or
-:class:`~maldideepkit.MaldiTransformerClassifier` - both use a pooled
-head whose width is independent of ``input_dim``.
+:class:`~maldideepkit.MaldiTransformerClassifier` (both use a pooled
+head whose width is independent of ``input_dim``).

@@ -16,10 +16,12 @@ MaldiDeepKit Documentation
 ==========================
 
 A catalog of sklearn-compatible deep learning classifiers for MALDI-TOF
-mass spectrometry. Four PyTorch architectures - MLP (with optional
-sigmoid-gated attention), 1-D CNN, 1-D ResNet, and 1-D Vision
-Transformer - wrapped in a unified estimator API, with defaults
-calibrated for ~6000-bin MALDI-TOF input.
+mass spectrometry. Four PyTorch backbone architectures (MLP with
+optional sigmoid-gated attention, 1-D CNN, 1-D ResNet, and 1-D Vision
+Transformer) plus a dual-branch classifier for spectrum + side-feature
+inputs and a self-training meta-classifier for semi-supervised data,
+all wrapped in a unified estimator API with defaults calibrated for
+~6000-bin MALDI-TOF input.
 
 .. container:: sd-d-flex-row sd-flex-justify-content-center sd-gap-2 sd-mb-4
 
@@ -57,8 +59,8 @@ Key Features
       :link-type: url
 
       MLP with optional attention, 1-D CNN, 1-D ResNet, and 1-D Vision
-      Transformer - all calibrated for ~6000-bin MALDI-TOF spectra
-      out of the box.
+      Transformer (all calibrated for ~6000-bin MALDI-TOF spectra
+      out of the box).
 
    .. grid-item-card:: Sklearn-Compatible
       :link: quickstart.html#fitting-a-classifier
@@ -153,7 +155,7 @@ Key Features
       :link-type: url
 
       Sibling of ``MaldiAMRKit`` (preprocessing) and ``MaldiBatchKit``
-      (batch correction) - three packages sharing the same data model.
+      (batch correction), three packages sharing the same data model.
 
 ----
 
@@ -175,9 +177,9 @@ Quick Example
    proba = clf.predict_proba(X)
    weights = clf.get_attention_weights(X[:10])   # (10, hidden_dim)
 
-Train/test without leakage - the optional spectral warper is fit on
+Train/test without leakage (the optional spectral warper is fit on
 the training fold only and applied to held-out samples via the same
-fitted parameters at ``predict`` time:
+fitted parameters at ``predict`` time):
 
 .. code-block:: python
 
