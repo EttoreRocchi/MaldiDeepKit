@@ -1,8 +1,8 @@
-API Reference
+API reference
 =============
 
 Complete reference for all public classes and functions in MaldiDeepKit,
-organized by module.
+organised by module.
 
 .. toctree::
    :maxdepth: 2
@@ -15,12 +15,13 @@ organized by module.
    transformer
    dual_branch
    semisupervised
+   pretraining
    blocks
    augment
    uncertainty
    utils
 
-Base Classes
+Base classes
 ------------
 
 Every single-input classifier inherits from
@@ -52,13 +53,35 @@ Classifiers
    maldideepkit.MaldiDualBranchClassifier
    maldideepkit.MaldiSelfTrainingClassifier
 
-Building Blocks
+Self-supervised pre-training
+----------------------------
+
+Pre-train a backbone on unlabelled spectra, then start a classifier's
+trunk from it with ``init_from=`` (optionally with linear probing first,
+``freeze_trunk_epochs=``). See :doc:`pretraining`.
+
+.. autosummary::
+   :nosignatures:
+
+   maldideepkit.pretraining.MaldiSpectrumEncoder
+   maldideepkit.pretraining.Pretext
+   maldideepkit.pretraining.MAEPretext
+   maldideepkit.pretraining.ShufflePretext
+   maldideepkit.pretraining.ShuffleMAEPretext
+   maldideepkit.pretraining.ContrastivePretext
+   maldideepkit.pretraining.register_pretext
+   maldideepkit.pretraining.get_pretext_class
+   maldideepkit.pretraining.register_backbone
+   maldideepkit.pretraining.get_backbone_class
+   maldideepkit.pretraining.make_pretraining_loaders
+
+Building blocks
 ---------------
 
 Low-level ``nn.Module`` classes backing each classifier are re-exported
 through the :mod:`maldideepkit.blocks` namespace, so a user who wants to
 embed a single component in a custom network can import from one place.
-See :doc:`blocks` for the full list, grouped into full backbones vs.
+See :doc:`blocks` for the full list, grouped into full backbones vs
 composable primitives.
 
 .. code-block:: python
@@ -71,7 +94,7 @@ composable primitives.
        # ...
    )
 
-Training Utilities
+Training utilities
 ------------------
 
 .. autosummary::
@@ -79,6 +102,7 @@ Training Utilities
 
    maldideepkit.utils.seed_everything
    maldideepkit.utils.resolve_device
+   maldideepkit.utils.Callback
    maldideepkit.utils.EarlyStopping
    maldideepkit.utils.train_loop
    maldideepkit.utils.FocalLoss
@@ -101,7 +125,7 @@ during validation and inference. See :doc:`augment` for the full API.
    maldideepkit.augment.apply_mixup
    maldideepkit.augment.apply_cutmix
 
-Uncertainty Quantification
+Uncertainty quantification
 --------------------------
 
 Drop-in estimators that wrap a fitted classifier and return calibrated

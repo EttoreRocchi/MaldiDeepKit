@@ -1,18 +1,17 @@
-Dual-Branch Module
+Dual-branch module
 ==================
 
 Dual-input classifier that conditions on both the spectrum and a
 per-row **side feature** (e.g. an antibiotic fingerprint, a culture
 medium descriptor, an instrument ID). The side feature is packed into
-``X`` by column concatenation so the resulting class behaves like any
-other :class:`~maldideepkit.BaseSpectralClassifier` from sklearn's
-perspective (``Pipeline``, ``GridSearchCV``, and ``cross_val_score``
-all work without glue code).
+``X`` by column concatenation, so the class behaves like any other
+:class:`~maldideepkit.BaseSpectralClassifier` for scikit-learn (it
+works in ``Pipeline``, ``GridSearchCV``, and ``cross_val_score``).
 
 Preprocessing and the split point
 ---------------------------------
 
-Every knob that assumes its input is a spectrum is confined to the
+Every parameter that assumes its input is a spectrum is confined to the
 first ``n_spec_bins`` columns; the side block is passed through
 untouched.
 
@@ -20,7 +19,7 @@ untouched.
    :header-rows: 1
    :widths: 30 70
 
-   * - Knob
+   * - Parameter
      - Applies to
    * - ``warping``, ``standardize``, ``input_transform``
      - Spectrum columns only. Fitted on the training split of the
@@ -61,8 +60,8 @@ classifier. Requires the optional ``rdkit`` extra (see
 
 .. autofunction:: maldideepkit.smiles_to_fingerprint
 
-Example
--------
+Examples
+--------
 
 Pack a 64-bin spectrum next to a 16-dim side vector and fit:
 
@@ -84,9 +83,9 @@ Pack a 64-bin spectrum next to a 16-dim side vector and fit:
        random_state=0,
    ).fit(X, y)
 
-Plug a fitted backbone (e.g. a CNN) in as the spectral branch (its
-final ``nn.Linear`` is replaced with ``Identity``, so the module
-exposes features rather than logits):
+Plug a backbone (an instance, or a name such as ``"cnn"``) in as the
+spectral branch (its final ``nn.Linear`` is replaced with ``Identity``,
+so the module exposes features rather than logits):
 
 .. code-block:: python
 
@@ -96,6 +95,19 @@ exposes features rather than logits):
        n_spec_bins=64,
        backbone=MaldiCNNClassifier(channels=(8, 16), head_dim=32),
        fp_hidden_dims=(16,),
+   )
+
+Start the spectral branch from a pre-trained encoder (without
+``backbone=``, it takes the architecture of the encoder), and optionally
+freeze it for the first epochs while the side branch and the fusion head
+train:
+
+.. code-block:: python
+
+   clf = MaldiDualBranchClassifier(
+       n_spec_bins=64,
+       init_from=encoder,
+       freeze_trunk_epochs=10,
    )
 
 Convert SMILES into ECFP4 fingerprints for the side input (requires

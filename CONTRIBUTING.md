@@ -14,11 +14,11 @@ pre-commit install
 ## Testing
 
 ```bash
-make test            # fast subset (excludes slow markers)
-make test-cov        # full run with term + HTML coverage report
+make test            # full test suite
+make test-cov        # full test suite with a terminal coverage report
 ```
 
-The coverage gate is 95%. Please add tests for any new public API.
+Please add tests for any new public API.
 
 ## Linting
 
@@ -63,8 +63,7 @@ dict, and add per-model tests in `tests/test_<family>.py`.
 - Summarise the change in one sentence in the PR title and use the PR
   body to motivate the design decision.
 - Update `CHANGELOG.md` under the next version heading.
-- Make sure `make test` and `make lint` are clean; coverage stays
-  ≥ 95%.
+- Make sure `make test` and `make lint` are clean.
 
 ## Reporting issues
 
@@ -74,5 +73,5 @@ minimal reproducer:
 
 - MaldiDeepKit version (`python -c "import maldideepkit; print(maldideepkit.__version__)"`)
 - PyTorch, scikit-learn, and `maldiamrkit` versions
-- Feature matrix shape, classifier and kwargs, and the exception or
-  wrong result
+- Feature matrix shape, classifier and its parameters, and the
+  exception or wrong result

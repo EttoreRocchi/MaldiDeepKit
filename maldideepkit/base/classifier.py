@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import os
+import uuid
+import warnings
 from abc import ABCMeta, abstractmethod
 from pathlib import Path
 from typing import Any, Callable
@@ -15,10 +20,121 @@ from sklearn.utils.validation import check_is_fitted
 from torch import nn
 from torch.utils.data import DataLoader
 
+from ..utils.callbacks import callback_list, dispatch
 from ..utils.loss import FocalLoss
+from ..utils.optim import (
+    build_optimizer,
+    build_scheduler,
+    check_scheduler,
+    resolve_optimizer,
+)
 from ..utils.reproducibility import resolve_device, seed_everything
-from ..utils.training import EarlyStopping, train_loop
-from .data import SpectralDataset, _to_numpy, make_loaders
+from ..utils.training import EarlyStopping, resolve_amp_dtype, train_loop
+from ._config import same_config
+from ._registry import _REGISTERED
+from ._serialization import (
+    _decode_param,
+    _encode_param,
+    _estimator_spec,
+    _import_class,
+    _importable_class_path,
+    _init_parameters,
+    _UntrustedClassError,
+)
+from ._trunk import (
+    TrunkFreezer,
+    load_trunk_state,
+    split_trunk,
+    trunk_prefix,
+    trunk_state,
+)
+from .data import (
+    SpectralDataset,
+    _to_numpy,
+    apply_fitted_preprocessing,
+    make_loaders,
+    resolve_transform_mode,
+)
+
+_CHECKPOINT_SUFFIXES = (".warper.pkl", ".json", ".pth", ".pt")
+
+# Keyword arguments of every ``torch.compile`` call made for
+# ``torch_compile=True`` (static shapes: a training run sees at most a
+# handful of batch sizes). The unit tests switch the backend to "eager".
+_TORCH_COMPILE_OPTIONS: dict[str, Any] = {"dynamic": False}
+
+
+def _torch_compile(fn: Any) -> Any:
+    """Return ``torch.compile(fn)`` with :data:`_TORCH_COMPILE_OPTIONS`.
+
+    Used for ``torch_compile=True`` by the classifiers (on the training
+    module) and by :class:`~maldideepkit.pretraining.MaldiSpectrumEncoder`
+    (on the backbone's feature extractor).
+    """
+    return torch.compile(fn, **_TORCH_COMPILE_OPTIONS)
+
+
+def _checkpoint_base(path: str | os.PathLike) -> Path:
+    """Strip one known checkpoint suffix from ``path``.
+
+    Only ``.pt``, ``.pth``, ``.json``, and ``.warper.pkl`` are stripped;
+    any other dot is part of the name, so ``"enc_mask0.05"`` stays
+    ``enc_mask0.05`` (where :meth:`pathlib.Path.with_suffix` would turn
+    it into ``enc_mask0``).
+    """
+    base = Path(path)
+    for ext in _CHECKPOINT_SUFFIXES:
+        if base.name.endswith(ext) and base.name != ext:
+            return base.with_name(base.name[: -len(ext)])
+    return base
+
+
+def _checkpoint_file(base: Path, ext: str) -> Path:
+    """Append ``ext`` to the checkpoint base path ``base`` (no suffix swap)."""
+    return base.with_name(base.name + ext)
+
+
+def _write_checkpoint(
+    base: Path, state_dict: dict[str, Any], meta_json: str, warper: Any | None
+) -> None:
+    """Write the ``.pt``, ``.json`` and (with a ``warper``) ``.warper.pkl`` of ``base``.
+
+    Every file is first written to a hidden temporary name in the
+    target directory, then all of them are renamed over their targets,
+    so a failing write leaves neither a partial checkpoint nor a mix of
+    old and new files. A stale ``.warper.pkl`` is removed when
+    ``warper`` is ``None``.
+
+    Parameters
+    ----------
+    base : Path
+        Checkpoint base path (see :func:`_checkpoint_base`).
+    state_dict : dict
+        Module state dict, written with :func:`torch.save`.
+    meta_json : str
+        Serialised JSON metadata.
+    warper : object or None
+        Fitted warper, written with :func:`joblib.dump`.
+    """
+    base.parent.mkdir(parents=True, exist_ok=True)
+    exts = (".pt", ".json") if warper is None else (".pt", ".warper.pkl", ".json")
+    token = uuid.uuid4().hex
+    tmp = {ext: base.with_name(f".{base.name}{ext}.{token}.tmp") for ext in exts}
+    try:
+        torch.save(state_dict, tmp[".pt"])
+        if warper is not None:
+            import joblib
+
+            joblib.dump(warper, tmp[".warper.pkl"])
+        tmp[".json"].write_text(meta_json)
+    except BaseException:
+        for path in tmp.values():
+            path.unlink(missing_ok=True)
+        raise
+    for ext in exts:
+        os.replace(tmp[ext], _checkpoint_file(base, ext))
+    if warper is None:
+        _checkpoint_file(base, ".warper.pkl").unlink(missing_ok=True)
 
 
 def _serialise_transform_state(state: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -55,7 +171,7 @@ def _classifier_registry() -> dict[str, type]:
     """Map every exported concrete classifier class by name.
 
     Built dynamically from :mod:`maldideepkit`'s public exports so
-    :meth:`BaseSpectralClassifier.load` picks up new classifier classes
+    :meth:`~maldideepkit.BaseSpectralClassifier.load` picks up new classifier classes
     (e.g. :class:`~maldideepkit.MaldiDualBranchClassifier`) without a
     hand-maintained list.
     """
@@ -70,31 +186,123 @@ def _classifier_registry() -> dict[str, type]:
             and not getattr(obj, "__abstractmethods__", frozenset())
         ):
             registry[obj.__name__] = obj
+    registry.update({cls.__name__: cls for cls in _REGISTERED.values()})
     return registry
 
 
 def _decode_hparams(
-    hparams: dict[str, Any], registry: dict[str, type]
+    hparams: dict[str, Any], registry: dict[str, type], *, trusted: bool = False
 ) -> dict[str, Any]:
     """Rebuild constructor kwargs from a saved hyperparameter dict.
 
-    Drops the unserialisable ``warping`` placeholder and reconstructs
+    Drops the unserialisable ``warping`` placeholder, reconstructs
     estimator-valued values stored by :meth:`_hparam_dict` as
     ``{"__estimator__": <class name>, "params": {...}}`` specs
-    (recursively, so a backbone's own estimator params survive too).
+    (recursively, so a backbone's own estimator params survive too),
+    and decodes every other value with
+    :func:`~maldideepkit.base._serialization._decode_param` (a
+    ``Pretext`` / ``SpectrumAugment`` class is re-imported, from a
+    module other than MaldiDeepKit's or an imported one only when
+    ``trusted``).
     """
     hparams.pop("warping", None)
     for key, value in hparams.items():
         if isinstance(value, dict) and "__estimator__" in value:
             sub_name = value["__estimator__"]
-            if sub_name not in registry:
+            if sub_name in registry:
+                sub_cls = registry[sub_name]
+            elif value.get("__class__") is not None:
+                sub_cls = _import_class(
+                    value["__class__"], BaseSpectralClassifier, key, trusted=trusted
+                )
+            else:
                 raise ValueError(
                     f"Unknown estimator class {sub_name!r} in saved "
                     f"hyperparameter {key!r}."
                 )
-            sub_params = _decode_hparams(dict(value["params"]), registry)
-            hparams[key] = registry[sub_name](**sub_params)
+            sub_params = _decode_hparams(
+                dict(value["params"]), registry, trusted=trusted
+            )
+            hparams[key] = sub_cls(**sub_params)
+        else:
+            hparams[key] = _decode_param(value, trusted=trusted)
     return hparams
+
+
+def _is_fitted_encoder(obj: Any) -> bool:
+    """Return whether ``obj`` is a fitted ``MaldiSpectrumEncoder``."""
+    if obj is None or isinstance(obj, (str, os.PathLike)):
+        return False
+    # Lazy import: ``maldideepkit.pretraining`` imports this module.
+    from ..pretraining.encoder import MaldiSpectrumEncoder
+
+    return isinstance(obj, MaldiSpectrumEncoder) and hasattr(obj, "model_")
+
+
+def _load_init_encoder(init_from: Any) -> tuple[Any, dict[str, Any]]:
+    """Resolve an ``init_from`` value into a fitted encoder plus provenance.
+
+    Parameters
+    ----------
+    init_from : str, path-like or MaldiSpectrumEncoder
+        Base path of an encoder checkpoint (``.pt`` / ``.json`` suffix
+        optional) or a fitted encoder instance.
+
+    Returns
+    -------
+    encoder : MaldiSpectrumEncoder
+        The fitted encoder (the instance itself, not a copy).
+    provenance : dict
+        ``{"path": <absolute base path>, "sha256": <hex digest of the
+        .pt>}`` for a path, ``{"path": None, "sha256": None}`` for an
+        in-memory encoder.
+
+    Raises
+    ------
+    ValueError
+        If ``init_from`` is an unfitted encoder, or a checkpoint that
+        names a class or a function that ``MaldiSpectrumEncoder.load``
+        refuses with the default ``trusted=False`` (see its ``trusted``
+        parameter).
+    TypeError
+        If ``init_from`` is neither a path nor an encoder.
+    """
+    from ..pretraining.encoder import MaldiSpectrumEncoder
+
+    if isinstance(init_from, (str, os.PathLike)):
+        base = _checkpoint_base(Path(init_from).expanduser())
+        try:
+            encoder = MaldiSpectrumEncoder.load(base)
+        except _UntrustedClassError as exc:
+            raise ValueError(
+                f"init_from: {exc} A checkpoint path in init_from is loaded "
+                "with trusted=False; for a trusted checkpoint, load it with "
+                "MaldiSpectrumEncoder.load(path, trusted=True) and pass the "
+                "encoder instance as init_from."
+            ) from exc
+        digest = hashlib.sha256(_checkpoint_file(base, ".pt").read_bytes()).hexdigest()
+        return encoder, {"path": str(base.resolve()), "sha256": digest}
+    if isinstance(init_from, MaldiSpectrumEncoder):
+        if not hasattr(init_from, "model_"):
+            raise ValueError(
+                "init_from is an unfitted MaldiSpectrumEncoder; fit it first "
+                "or pass the path of a saved encoder checkpoint. A "
+                "hyperparameter search over init_from (e.g. GridSearchCV) "
+                "clones each candidate, which drops the fitted state of an "
+                "encoder instance: search over checkpoint paths instead "
+                "(encoder.save(path), then {'init_from': [path_a, path_b]})."
+            )
+        return init_from, {"path": None, "sha256": None}
+    raise TypeError(
+        "init_from must be None, the path of a MaldiSpectrumEncoder "
+        "checkpoint, or a fitted MaldiSpectrumEncoder; got "
+        f"{type(init_from).__name__}."
+    )
+
+
+def _format_arch(name: str, params: dict[str, Any]) -> str:
+    """Render ``name(k=v, ...)`` for architecture error messages."""
+    return f"{name}({', '.join(f'{k}={v!r}' for k, v in params.items())})"
 
 
 class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):  # type: ignore[misc]
@@ -126,18 +334,24 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
     label_smoothing : float, default=0.0
         Label smoothing factor in ``[0, 1)`` passed to the loss. Applied
         to both cross-entropy and focal-loss paths.
-    loss : {"cross_entropy", "focal"}, default="cross_entropy"
+    loss : {"cross_entropy", "focal"}, nn.Module or callable, default="cross_entropy"
         Classification loss. ``"focal"`` uses
         :class:`~maldideepkit.utils.FocalLoss` with ``gamma=focal_gamma``.
-        Good for highly imbalanced problems.
+        Good for highly imbalanced problems. A module (or module class,
+        instantiated without arguments) or a function is called as
+        ``loss(logits, target)`` and returns one value per row or a scalar
+        (a scalar cannot be combined with ``sample_weight``). ``target``
+        holds class indices, or probabilities of shape ``(batch,
+        n_classes)`` on training batches with ``mixup_alpha`` /
+        ``cutmix_alpha``. ``class_weight`` and ``label_smoothing`` only
+        apply to the built-in losses. A module is copied at :meth:`fit`.
     focal_gamma : float, default=2.0
         Focal-loss focusing parameter. Ignored when
         ``loss="cross_entropy"``.
     use_amp : bool, default=False
-        If ``True`` and the resolved device is CUDA, run forward + loss
-        under :func:`torch.autocast` and use :class:`torch.amp.GradScaler`
-        for backward. ~2x wall-time speedup on recent NVIDIA GPUs. On CPU
-        this is a no-op.
+        If ``True`` and the resolved device is a GPU, run the forward pass
+        and the loss under :func:`torch.autocast` in ``amp_dtype``. About
+        2x faster on recent NVIDIA GPUs; no effect on CPU.
     swa_start_epoch : int or None, default=None
         If set, start Stochastic Weight Averaging at this epoch. The SWA
         average replaces the best-val checkpoint at the end of fit.
@@ -151,7 +365,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         Metric used by ``tune_threshold``.
     calibrate_temperature : bool, default=False
         If ``True``, after fit run LBFGS-based temperature scaling on
-        held-out validation logits (Guo et al. 2017). The fitted
+        held-out validation logits (Guo et al., 2017). The fitted
         temperature is stored as :attr:`temperature_` and applied in
         :meth:`predict_proba` to sharpen / smooth probabilities
         without changing the argmax.
@@ -174,7 +388,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         Maximum number of training epochs.
     early_stopping_patience : int, default=10
         Number of epochs without validation-loss improvement before
-        training is stopped.
+        training stops.
     val_fraction : float, default=0.1
         Fraction of the training data held out for the internal
         validation split.
@@ -188,18 +402,19 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         ``"none"`` (when False). Kept for backwards compatibility;
         ``input_transform`` is the modern interface and wins when
         both are supplied.
-    input_transform : str, optional
+    input_transform : str or None, default=None
         One of ``{"none", "standardize", "log1p", "robust",
-        "log1p+standardize"}``. Fit on the (warped) training split
-        only and stored as :attr:`input_transform_state_`; reapplied
-        at :meth:`predict` / :meth:`predict_proba` time.
-    warping : sklearn-style transformer, optional
+        "log1p+standardize"}``, or ``None`` to follow ``standardize``.
+        Fit on the (warped) training split only and stored as
+        :attr:`input_transform_state_`; reapplied at :meth:`predict` /
+        :meth:`predict_proba` time.
+    warping : sklearn-style transformer or None, default=None
         Spectral alignment / warping transformer applied **before**
         standardization. Fitted on the training split only, then
         used to transform both splits during training and new data
         at :meth:`predict` / :meth:`predict_proba` time. The fitted
         transformer is stored as :attr:`warper_`.
-    metrics_log_path : str or Path, optional
+    metrics_log_path : str, Path or None, default=None
         If set, write a per-epoch metrics CSV to this path during
         :meth:`fit`. One row per epoch with columns ``epoch,
         train_loss, val_loss, lr, mean_grad_norm, n_grad_updates``
@@ -210,7 +425,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         split and record ``train_auroc`` + ``val_auroc`` alongside the
         losses. Adds one extra pass per epoch; binary classification
         only.
-    augment : callable, optional
+    augment : callable or None, default=None
         Per-batch augmentation applied to training batches only. The
         usual choice is :class:`~maldideepkit.augment.SpectrumAugment`.
     mixup_alpha : float, default=0.0
@@ -242,7 +457,94 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
     random_state : int, default=0
         Seeds Python, NumPy, and PyTorch RNGs and the validation split.
     verbose : bool, default=False
-        If ``True``, prints one line per training epoch.
+        If ``True``, print one line per epoch.
+    init_from : str, path-like, MaldiSpectrumEncoder or None, default=None
+        Initialise the trunk (every parameter and buffer of the
+        backbone module except its ``final_layer``) from a
+        self-supervised :class:`~maldideepkit.pretraining.MaldiSpectrumEncoder`:
+        either the base path of a checkpoint written by its ``save``
+        (clone-safe, works in ``GridSearchCV``) or a fitted encoder
+        instance (kept by reference across :func:`sklearn.base.clone`
+        copies, so it is shared and must be treated as read-only).
+        A search **over** ``init_from`` itself (e.g.
+        ``GridSearchCV(clf, {"init_from": [...]})``) must list
+        checkpoint paths: the search clones every candidate value,
+        which turns a fitted encoder instance into an unfitted copy and
+        makes :meth:`fit` raise :class:`ValueError`.
+        A path is loaded with the default ``trusted=False`` (see
+        :meth:`MaldiSpectrumEncoder.load
+        <maldideepkit.pretraining.MaldiSpectrumEncoder.load>`); for a
+        trusted checkpoint, pass
+        ``MaldiSpectrumEncoder.load(path, trusted=True)``. A
+        ``.warper.pkl`` is a pickle, read whatever ``trusted`` is: load
+        checkpoints with a warper only from trusted sources.
+        Resolved once per :meth:`fit`. The classifier then **inherits
+        the encoder's fitted preprocessing** (warper and input-transform
+        state) instead of fitting its own on the training split, so
+        ``standardize`` / ``input_transform`` (compared on the resolved
+        mode), ``warping`` (compared by configuration) and the number
+        of input bins must match the encoder's, else
+        :class:`ValueError`. A trunk tensor missing on either side or
+        with a different shape also raises :class:`ValueError` (no
+        partial load). ``fit(warm_start=True)`` with an existing
+        :attr:`model_` takes precedence on the first attempt; every
+        rebuilt model (including retries) is initialised from the
+        encoder. :meth:`load` never re-applies ``init_from``.
+    freeze_trunk_epochs : int, default=0
+        Linear probing then fine-tuning (LP-FT; Kumar et al., 2022): for
+        the first ``freeze_trunk_epochs`` epochs only the
+        ``final_layer`` is trained, the trunk parameters are frozen and
+        the trunk modules run in ``eval()`` mode (BatchNorm running
+        statistics and dropout frozen); then the trunk is unfrozen and
+        the early-stopping patience restarts. A value ``>= epochs``
+        gives a pure linear probe. Early stopping also acts during the
+        frozen phase: with ``early_stopping_patience <
+        freeze_trunk_epochs`` training can end before the trunk is
+        unfrozen, which leaves a pure linear probe
+        (``trunk_unfroze_=False``). Valid without ``init_from``, but
+        only meaningful with it. The ``requires_grad`` flags are
+        restored after :meth:`fit` (a parameter frozen by the user
+        stays frozen).
+    torch_compile : bool, default=False
+        If ``True``, the training and validation forward passes of
+        :meth:`fit` run through ``torch.compile(model)``. Compilation
+        happens on the first batches (and again for each new batch
+        shape, e.g. the last batch of an epoch) and takes seconds to
+        minutes, so it pays off on long runs, mostly on a GPU. The
+        compiled wrapper only lives during :meth:`fit`: :attr:`model_`,
+        the :meth:`save` checkpoint and the ``init_from`` transfer
+        always use the underlying module (state-dict keys without the
+        ``_orig_mod.`` prefix), inference runs eagerly, and pickling
+        or :func:`~sklearn.base.clone` never see a compiled module.
+    amp_dtype : {"float16", "bfloat16", "auto"}, default="float16"
+        Autocast dtype of ``use_amp=True`` on a GPU (ignored otherwise).
+        ``"float16"`` scales the loss with :class:`torch.amp.GradScaler`.
+        ``"bfloat16"`` keeps the exponent range of ``float32``, so an
+        activation cannot overflow (as a wide ``Linear`` over a
+        flattened feature map can in ``float16`` once its weights have
+        grown, e.g. in a trunk transferred with ``init_from``), and
+        trains without a ``GradScaler``. ``"auto"`` picks
+        ``"bfloat16"`` when the GPU supports it, else ``"float16"``.
+    optimizer : None, str or callable, default=None
+        ``None`` uses :class:`torch.optim.AdamW` when ``weight_decay > 0``,
+        else :class:`torch.optim.Adam`. A string is the case-insensitive
+        name of a :mod:`torch.optim` class (e.g. ``"sgd"``). A class or
+        factory is called as ``optimizer(param_groups, lr=learning_rate,
+        weight_decay=weight_decay)``, each keyword only when it accepts it
+        and a :func:`functools.partial` does not already fix it, so
+        ``functools.partial(torch.optim.SGD, momentum=0.9)`` works.
+        Combines with ``use_sam``. A closure-based optimizer such as
+        :class:`torch.optim.LBFGS` is not supported.
+    scheduler : None, str or callable, default=None
+        Learning-rate schedule after the ``warmup_epochs`` epochs.
+        ``None`` or ``"cosine"`` anneals to ``1e-6`` over the remaining
+        epochs; ``"constant"`` keeps the learning rate. A class or factory
+        is called as ``scheduler(optimizer)``. It is stepped once per
+        epoch (:class:`~torch.optim.lr_scheduler.ReduceLROnPlateau` with
+        the validation loss); a per-batch schedule fits in a callback.
+    callbacks : Callback, sequence of Callback or None, default=None
+        Objects whose hooks (:class:`~maldideepkit.utils.Callback`) run
+        during :meth:`fit`. Clones of the estimator share them.
 
     Attributes
     ----------
@@ -265,18 +567,32 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         For dual-input classifiers both arrays cover the spectrum
         block only (see :class:`~maldideepkit.BaseDualSpectralClassifier`).
     n_features_in_ : int
-        Number of features seen at :meth:`fit` (sklearn convention).
+        Number of features seen at :meth:`fit` (scikit-learn convention).
+    trunk_unfroze_ : bool
+        ``False`` when ``freeze_trunk_epochs > 0`` and training ended
+        before epoch ``freeze_trunk_epochs`` (the trunk stayed frozen
+        and is then restored exactly to its initial weights, undoing
+        EMA / SWA averaging drift and ``update_bn``); ``True``
+        otherwise (always with ``freeze_trunk_epochs=0``).
+    best_epoch_phase_ : {"frozen", "unfrozen"}
+        Training phase that produced the deployed weights:
+        ``"frozen"`` when the trunk never unfroze or the
+        best-validation epoch fell in the frozen phase, ``"unfrozen"``
+        otherwise (EMA / SWA averages including an unfrozen epoch count
+        as ``"unfrozen"``; always ``"unfrozen"`` with
+        ``freeze_trunk_epochs=0``).
     """
 
     def __init__(
         self,
         input_dim: int | None = None,
         n_classes: int = 2,
+        *,
         learning_rate: float = 1e-3,
         weight_decay: float = 0.0,
         grad_clip_norm: float | None = None,
         label_smoothing: float = 0.0,
-        loss: str = "cross_entropy",
+        loss: Any = "cross_entropy",
         focal_gamma: float = 2.0,
         use_amp: bool = False,
         swa_start_epoch: int | None = None,
@@ -306,6 +622,13 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         device: str | torch.device = "auto",
         random_state: int = 0,
         verbose: bool = False,
+        init_from: str | Path | Any | None = None,
+        freeze_trunk_epochs: int = 0,
+        torch_compile: bool = False,
+        amp_dtype: str = "float16",
+        optimizer: Any = None,
+        scheduler: Any = None,
+        callbacks: Any = None,
     ) -> None:
         self.input_dim = input_dim
         self.n_classes = n_classes
@@ -343,6 +666,13 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         self.device = device
         self.random_state = random_state
         self.verbose = verbose
+        self.init_from = init_from
+        self.freeze_trunk_epochs = freeze_trunk_epochs
+        self.torch_compile = torch_compile
+        self.amp_dtype = amp_dtype
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.callbacks = callbacks
 
     @abstractmethod
     def _build_model(self) -> nn.Module:
@@ -352,6 +682,72 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         :attr:`n_classes_` rather than the constructor arguments, since
         those are the values resolved at :meth:`fit` time.
         """
+
+    def _arch_params(self) -> dict[str, Any]:
+        """Return the architecture kwargs :meth:`_build_model` passes to the module.
+
+        Excludes the fit-time ``input_dim`` / ``n_classes``, so it is
+        available on an unfitted template. Built-in classifiers return
+        exactly the kwargs of their backbone module; the default (for
+        custom subclasses) is empty. Used in ``init_from`` error
+        messages.
+        """
+        return {}
+
+    @classmethod
+    def _get_param_names(cls) -> list[str]:
+        """Return the constructor parameters, following ``**kwargs`` up the MRO.
+
+        As :class:`~sklearn.base.BaseEstimator`, except that a subclass
+        ``__init__`` taking ``**kwargs`` also has the parameters of the
+        next ``__init__`` in the MRO. So
+        ``def __init__(self, hidden=16, **kwargs): super().__init__(**kwargs)``
+        keeps every base parameter through ``clone``, ``GridSearchCV``,
+        and ``save`` / ``load``. Such a subclass must forward ``kwargs``
+        unchanged: fixing a base parameter in its ``super().__init__``
+        call raises :class:`TypeError` when it is cloned.
+        """
+        return sorted(_init_parameters(cls))
+
+    def __sklearn_clone__(self) -> BaseSpectralClassifier:
+        """Clone as :class:`~sklearn.base.BaseEstimator` does, sharing a fitted encoder.
+
+        A fitted :class:`~maldideepkit.pretraining.MaldiSpectrumEncoder`
+        passed as ``init_from`` is reattached by reference (a plain
+        clone would drop its fitted state); everything else, including
+        metadata-routing requests, follows the scikit-learn default.
+        """
+        new = super().__sklearn_clone__()
+        if _is_fitted_encoder(self.init_from):
+            new.init_from = self.init_from
+        return new
+
+    def set_params(self, **params: Any) -> BaseSpectralClassifier:
+        """Set parameters, refusing to mutate a shared fitted encoder.
+
+        Same as :meth:`sklearn.base.BaseEstimator.set_params`, except
+        that while ``init_from`` is a fitted encoder (shared by
+        reference across clones) an ``init_from__<name>`` key whose
+        value differs from the encoder's raises :class:`ValueError`.
+        Keys whose value is unchanged are skipped, so no-op round trips
+        such as ``set_params(**get_params(deep=True))`` are accepted.
+        """
+        encoder = params.get("init_from", self.init_from)
+        if _is_fitted_encoder(encoder):
+            current = encoder.get_params(deep=True)
+            for key in [k for k in params if k.startswith("init_from__")]:
+                name = key[len("init_from__") :]
+                if name not in current:
+                    continue
+                if not same_config(params[key], current[name]):
+                    raise ValueError(
+                        f"Cannot set {key}: init_from is a fitted "
+                        "MaldiSpectrumEncoder shared by reference across clones "
+                        "and must stay read-only. Fit a new encoder instead, or "
+                        "pass init_from as a checkpoint path."
+                    )
+                del params[key]
+        return super().set_params(**params)
 
     def _optimizer_param_groups(self, model: nn.Module) -> list[dict[str, Any]]:
         """Return parameter groups for the optimizer.
@@ -405,7 +801,17 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
 
     def _build_criterion(
         self, class_weight: torch.Tensor | None, *, reduction: str = "none"
-    ) -> nn.Module:
+    ) -> nn.Module | Callable[..., torch.Tensor]:
+        if not isinstance(self.loss, str):
+            loss = self.loss() if isinstance(self.loss, type) else self.loss
+            if isinstance(loss, nn.Module):
+                return copy.deepcopy(loss)
+            if callable(loss):
+                return loss
+            raise TypeError(
+                "loss must be 'cross_entropy', 'focal', an nn.Module or a callable; "
+                f"got {type(loss).__name__}."
+            )
         if self.loss == "cross_entropy":
             return nn.CrossEntropyLoss(
                 weight=class_weight,
@@ -420,7 +826,8 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
                 reduction=reduction,
             )
         raise ValueError(
-            f"Unknown loss={self.loss!r}; expected 'cross_entropy' or 'focal'."
+            f"Unknown loss={self.loss!r}; expected 'cross_entropy', 'focal', an "
+            "nn.Module or a callable."
         )
 
     @staticmethod
@@ -478,6 +885,166 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         y_encoded = np.searchsorted(self.classes_, y_np).astype(np.int64)
         return X_np, y_encoded
 
+    def _resolve_init_encoder(self) -> Any | None:
+        """Resolve ``init_from`` into a fitted encoder checked against this classifier.
+
+        Called once per :meth:`fit`, after :meth:`_prepare_inputs`. A
+        path is loaded with ``MaldiSpectrumEncoder.load``; an instance
+        must be fitted. Records the checkpoint provenance written by
+        :meth:`save`.
+
+        Returns
+        -------
+        MaldiSpectrumEncoder or None
+            The encoder, or ``None`` when ``init_from`` is unset.
+        """
+        self._init_from_provenance: dict[str, Any] | None = None
+        if self.init_from is None:
+            return None
+        encoder, provenance = _load_init_encoder(self.init_from)
+        self._check_init_encoder(encoder, int(self.input_dim_))
+        self._init_from_provenance = provenance
+        return encoder
+
+    def _check_init_encoder(self, encoder: Any, n_spec_bins: int) -> None:
+        """Check that this classifier's preprocessing config matches ``encoder``.
+
+        With ``init_from`` the classifier inherits the encoder's fitted
+        preprocessing, so its config is an assertion: the number of
+        spectrum bins, the resolved input-transform mode and the
+        warping configuration (both absent, or :func:`same_config`
+        against the encoder's fitted ``warper_``) must all match.
+
+        Raises
+        ------
+        ValueError
+            Naming the first mismatching field.
+        """
+        if int(encoder.input_dim_) != int(n_spec_bins):
+            raise ValueError(
+                f"init_from: input_dim mismatch: the encoder was fitted on "
+                f"{encoder.input_dim_} bins but this classifier has "
+                f"{n_spec_bins} spectrum bins."
+            )
+        mode = resolve_transform_mode(bool(self.standardize), self.input_transform)
+        encoder_mode = encoder.input_transform_state_.get("mode", "none")
+        if mode != encoder_mode:
+            raise ValueError(
+                f"init_from: input_transform mismatch: this classifier resolves "
+                f"standardize={self.standardize!r}, "
+                f"input_transform={self.input_transform!r} to {mode!r} but the "
+                f"encoder was fitted with {encoder_mode!r}. The classifier "
+                "inherits the encoder's preprocessing, so set "
+                f"input_transform={encoder_mode!r}."
+            )
+        warper = encoder.warper_
+        if (self.warping is None) != (warper is None) or (
+            warper is not None and not same_config(self.warping, warper)
+        ):
+            raise ValueError(
+                f"init_from: warping mismatch: this classifier has "
+                f"warping={self.warping!r} but the encoder was fitted with "
+                f"warper {warper!r}. The classifier inherits the encoder's "
+                "fitted warper, so its warping config must be identical."
+            )
+
+    def _frozen_epochs(self) -> int:
+        """Return the number of epochs of the linear-probing phase."""
+        return int(self.freeze_trunk_epochs)
+
+    def _trunk_target(self, model: nn.Module) -> tuple[nn.Module, str | None]:
+        """Return ``(module, skip_prefix)`` locating the trunk inside ``model``.
+
+        ``init_from`` copies the encoder trunk into every tensor of
+        ``module`` outside ``skip_prefix``; ``freeze_trunk_epochs``
+        freezes those tensors. Single-input classifiers return the
+        whole model and the qualified name of its final layer: its
+        ``final_layer``, or the final :class:`~torch.nn.Linear` of a
+        custom module without one (see
+        :func:`~maldideepkit.base._trunk.trunk_prefix`).
+        """
+        return model, trunk_prefix(model, self.input_dim_)
+
+    def _build_initial_model(
+        self, device: torch.device, encoder: Any | None
+    ) -> nn.Module:
+        """Build a fresh model on ``device``, trunk copied from ``encoder`` if given.
+
+        Every trunk parameter and buffer is copied; the final layer
+        keeps its fresh initialisation. The trunk key sets must be
+        equal in both directions (final layer excluded on both sides)
+        with equal shapes, else :class:`ValueError` (no partial load).
+        """
+        model = self._build_model().to(device)
+        if encoder is None:
+            return model
+        target, skip = self._trunk_target(model)
+        own = trunk_state(target, skip)
+        backbone = encoder.model_.backbone
+        source = trunk_state(backbone, trunk_prefix(backbone, encoder.input_dim_))
+        missing = sorted(set(own) - set(source))
+        unexpected = sorted(set(source) - set(own))
+        mismatched = sorted(
+            k for k in set(own) & set(source) if own[k].shape != source[k].shape
+        )
+        if missing or unexpected or mismatched:
+            details = []
+            if missing:
+                details.append(
+                    f"{len(missing)} trunk tensor(s) missing from the encoder "
+                    f"(e.g. {missing[:3]})"
+                )
+            if unexpected:
+                details.append(
+                    f"{len(unexpected)} encoder trunk tensor(s) absent from this "
+                    f"classifier (e.g. {unexpected[:3]})"
+                )
+            if mismatched:
+                details.append(
+                    "shape mismatch "
+                    + ", ".join(
+                        f"{k}: {tuple(own[k].shape)} vs {tuple(source[k].shape)}"
+                        for k in mismatched[:3]
+                    )
+                )
+            template = encoder.backbone_template_
+            own_arch = self._arch_params()
+            raise ValueError(
+                "init_from: the encoder trunk does not match this classifier's "
+                f"trunk ({'; '.join(details)}). The encoder was pre-trained from "
+                f"{_format_arch(type(template).__name__, template._arch_params())}; "
+                "this classifier builds "
+                + (
+                    _format_arch(type(self).__name__, own_arch)
+                    if own_arch
+                    else type(target).__name__
+                )
+                + ". Pre-train the encoder from a template with the same "
+                "architecture."
+            )
+        load_trunk_state(target, skip, source)
+        return model
+
+    def _best_epoch_phase(
+        self, freezer: TrunkFreezer | None, early: EarlyStopping
+    ) -> str:
+        """Return the training phase of the deployed weights (``"frozen"`` / ``"unfrozen"``)."""
+        if freezer is None:
+            return "unfrozen"
+        if not freezer.unfroze:
+            return "frozen"
+        averaged = self.ema_decay is not None or (
+            self.swa_start_epoch is not None
+            and freezer.last_epoch >= int(self.swa_start_epoch)
+        )
+        if (
+            not averaged
+            and early.best_epoch is not None
+            and early.best_epoch < freezer.n_frozen
+        ):
+            return "frozen"
+        return "unfrozen"
+
     def fit(
         self,
         X: Any,
@@ -496,7 +1063,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         y : array-like of shape (n_samples,)
             Integer or string class labels. Re-encoded to ``0..n_classes-1``
             internally; original labels are preserved in :attr:`classes_`.
-        sample_weight : array-like of shape (n_samples,), optional
+        sample_weight : array-like of shape (n_samples,) or None, default=None
             Per-sample weights applied inside the loss. The training
             batch loss becomes the sklearn-style weighted mean
             ``sum_i (sw_i * cw_{y_i}) * l_i / sum_i sw_i * cw_{y_i}``,
@@ -514,28 +1081,50 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             When ``True`` and the estimator already has a fitted
             :attr:`model_`, the underlying :class:`torch.nn.Module` is
             reused as the starting point of training instead of being
-            rebuilt from scratch via :meth:`_build_model`. This unblocks
-            federated learning, continual learning, and fine-tuning
-            workflows that need ``fit()`` to *resume* from the current
-            weights rather than reinitialise. ``warm_start`` applies only
+            rebuilt from scratch via :meth:`_build_model`, so ``fit()``
+            *resumes* from the current weights rather than
+            reinitialising them (as federated learning, continual
+            learning, and fine-tuning workflows need). ``warm_start`` applies only
             to the first training attempt; retries triggered by
             ``retry_on_val_auroc_below`` always rebuild via
             :meth:`_build_model` (the warm-start weights already failed
             once). When ``warm_start=True`` but no prior ``model_``
-            exists, falls back silently to a fresh build (sklearn
-            convention).
+            exists, falls back silently to a fresh build (scikit-learn
+            convention). Every fresh build starts from the ``init_from``
+            trunk when it is set; the warm-started module does not
+            (its weights take precedence), but the encoder's
+            preprocessing is still inherited.
 
         Returns
         -------
         self : BaseSpectralClassifier
             The fitted estimator.
         """
-        seed_everything(int(self.random_state))
         X_np, y_encoded = self._prepare_inputs(X, y)
+        # Resolved before seeding: loading an encoder checkpoint builds
+        # a module and so consumes PyTorch RNG draws.
+        encoder = self._resolve_init_encoder()
+        n_frozen = self._frozen_epochs()
+        if n_frozen < 0:
+            raise ValueError(f"freeze_trunk_epochs must be >= 0; got {n_frozen!r}.")
+        resolve_optimizer(self.optimizer, float(self.weight_decay))
+        check_scheduler(self.scheduler)
+        callbacks = callback_list(self.callbacks)
+        seed_everything(int(self.random_state))
         sw_np = self._validate_sample_weight(sample_weight, X_np.shape[0])
         device = self._resolve_device()
 
-        warper = clone(self.warping) if self.warping is not None else None
+        if encoder is None:
+            warper = clone(self.warping) if self.warping is not None else None
+            fitted_preprocessing = None
+        else:
+            # Inherit the encoder's fitted preprocessing (copied, so the
+            # shared encoder is never mutated through this classifier).
+            warper = None
+            fitted_preprocessing = {
+                "warper": copy.deepcopy(encoder.warper_),
+                "input_transform_state": copy.deepcopy(encoder.input_transform_state_),
+            }
         train_loader, val_loader, stats = make_loaders(
             X_np,
             y_encoded,
@@ -547,6 +1136,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             warper=warper,
             sample_weight=sw_np,
             n_transform_cols=self._n_transform_cols(),
+            fitted_preprocessing=fitted_preprocessing,
         )
         self.feature_mean_ = stats["mean"]
         self.feature_std_ = stats["std"]
@@ -554,7 +1144,17 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         self.input_transform_state_ = stats["input_transform_state"]
         sw_val_np: np.ndarray | None = stats.get("sample_weight_val")
 
-        class_weight = self._compute_class_weight(y_encoded)
+        builtin_loss = isinstance(self.loss, str)
+        if not builtin_loss and (
+            self.class_weight is not None or float(self.label_smoothing) > 0
+        ):
+            warnings.warn(
+                "class_weight and label_smoothing only apply to the built-in "
+                f"losses: they are ignored with loss={self.loss!r}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        class_weight = self._compute_class_weight(y_encoded) if builtin_loss else None
         if class_weight is not None:
             class_weight = class_weight.to(device)
         # Per-sample losses are only needed when a weighting scheme has
@@ -565,6 +1165,8 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         criterion = self._build_criterion(
             class_weight, reduction="none" if needs_per_sample else "mean"
         )
+        if not builtin_loss and isinstance(criterion, nn.Module):
+            criterion = criterion.to(device)
 
         X_val_t, y_val_t = self._collect_validation(val_loader, device)
         sw_val_t: torch.Tensor | None = (
@@ -582,6 +1184,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         final_val_auroc = float("nan")
         base_seed = int(self.random_state)
         fitted_model: nn.Module | None = None
+        freezer: TrunkFreezer | None = None
         for attempt in range(total_attempts):
             if attempt > 0:
                 seed_everything(base_seed + 1_000_003 * attempt)
@@ -596,32 +1199,21 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
                 # learning caller's pre-loaded weights are not wiped.
                 model = self.model_.to(device)
             else:
-                model = self._build_model().to(device)
+                model = self._build_initial_model(device, encoder)
 
-            opt_cls = (
-                torch.optim.AdamW if float(self.weight_decay) > 0 else torch.optim.Adam
+            optimizer = build_optimizer(
+                self.optimizer,
+                self._optimizer_param_groups(model),
+                learning_rate=float(self.learning_rate),
+                weight_decay=float(self.weight_decay),
+                use_sam=bool(self.use_sam),
+                sam_rho=float(self.sam_rho),
             )
-            param_groups = self._optimizer_param_groups(model)
-            if bool(self.use_sam):
-                from ..utils.sam import SAMOptimizer
-
-                optimizer = SAMOptimizer(
-                    param_groups,
-                    base_optimizer=opt_cls,
-                    rho=float(self.sam_rho),
-                    lr=float(self.learning_rate),
-                    weight_decay=float(self.weight_decay),
-                )
-            else:
-                optimizer = opt_cls(
-                    param_groups,
-                    lr=float(self.learning_rate),
-                    weight_decay=float(self.weight_decay),
-                )
-            warmup = max(0, int(self.warmup_epochs))
-            t_max = max(1, int(self.epochs) - warmup)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=t_max, eta_min=1e-6
+            scheduler = build_scheduler(
+                self.scheduler,
+                optimizer,
+                epochs=int(self.epochs),
+                warmup_epochs=int(self.warmup_epochs),
             )
 
             metrics_recorder = self._build_metrics_recorder(
@@ -629,42 +1221,63 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             )
 
             early = EarlyStopping(patience=int(self.early_stopping_patience))
-            fitted_model = train_loop(
-                model,
-                train_loader,
-                (X_val_t, y_val_t, sw_val_t),
-                criterion,
-                optimizer,
-                scheduler,
-                device,
-                int(self.epochs),
-                early,
-                verbose=bool(self.verbose),
-                warmup_epochs=int(self.warmup_epochs),
-                grad_clip_norm=(
-                    float(self.grad_clip_norm)
-                    if self.grad_clip_norm is not None
-                    else None
-                ),
-                use_amp=bool(self.use_amp),
-                swa_start_epoch=(
-                    int(self.swa_start_epoch)
-                    if self.swa_start_epoch is not None
-                    else None
-                ),
-                use_sam=bool(self.use_sam),
-                metrics_recorder=metrics_recorder,
-                augment=self.augment,
-                mixup_alpha=float(self.mixup_alpha),
-                cutmix_alpha=float(self.cutmix_alpha),
-                n_classes=int(self.n_classes_),
-                mix_generator=self._make_mix_generator(),
-                ema_decay=(
-                    float(self.ema_decay) if self.ema_decay is not None else None
-                ),
-                class_weight_t=class_weight,
-                n_augment_cols=self._n_transform_cols(),
-            )
+            if int(self.epochs) > 0:
+                dispatch(callbacks, "on_train_start", model, self)
+            freezer = None
+            if n_frozen > 0:
+                freezer = TrunkFreezer(*self._trunk_target(model), n_frozen, early)
+            compiled = _torch_compile(model) if bool(self.torch_compile) else None
+            try:
+                fitted_model = train_loop(
+                    model,
+                    train_loader,
+                    (X_val_t, y_val_t, sw_val_t),
+                    criterion,
+                    optimizer,
+                    scheduler,
+                    device,
+                    int(self.epochs),
+                    early,
+                    verbose=bool(self.verbose),
+                    on_epoch_start=freezer,
+                    warmup_epochs=int(self.warmup_epochs),
+                    grad_clip_norm=(
+                        float(self.grad_clip_norm)
+                        if self.grad_clip_norm is not None
+                        else None
+                    ),
+                    use_amp=bool(self.use_amp),
+                    swa_start_epoch=(
+                        int(self.swa_start_epoch)
+                        if self.swa_start_epoch is not None
+                        else None
+                    ),
+                    use_sam=bool(self.use_sam),
+                    metrics_recorder=metrics_recorder,
+                    augment=self.augment,
+                    mixup_alpha=float(self.mixup_alpha),
+                    cutmix_alpha=float(self.cutmix_alpha),
+                    n_classes=int(self.n_classes_),
+                    mix_generator=self._make_mix_generator(),
+                    ema_decay=(
+                        float(self.ema_decay) if self.ema_decay is not None else None
+                    ),
+                    class_weight_t=class_weight,
+                    n_augment_cols=self._n_transform_cols(),
+                    compiled_model=compiled,
+                    amp_dtype=resolve_amp_dtype(str(self.amp_dtype), device),
+                    callbacks=callbacks,
+                )
+                if freezer is not None and not freezer.unfroze:
+                    # The trunk stayed frozen for the whole run: undo the
+                    # float drift of EMA / SWA averaging and update_bn so
+                    # it equals its initial weights exactly.
+                    freezer.restore_initial_trunk()
+            finally:
+                if freezer is not None:
+                    freezer.restore_flags()
+            if int(self.epochs) > 0:
+                dispatch(callbacks, "on_train_end", fitted_model)
 
             if retry_threshold is None or attempt == total_attempts - 1:
                 break
@@ -678,6 +1291,8 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         assert fitted_model is not None
         self.model_ = fitted_model
         self._device_ = device
+        self.trunk_unfroze_ = freezer is None or freezer.unfroze
+        self.best_epoch_phase_ = self._best_epoch_phase(freezer, early)
         self.threshold_ = None
         self.temperature_ = None
 
@@ -959,7 +1574,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         ``None`` (the default) means "every column", which is correct
         for single-input classifiers. Dual-input subclasses override
         this to return their spectrum width so that ``warping``,
-        ``standardize``, ``input_transform``, ``augment`` and CutMix
+        ``standardize``, ``input_transform``, ``augment``, and CutMix
         never touch the packed side-feature block. See
         :class:`~maldideepkit.BaseDualSpectralClassifier`.
         """
@@ -979,9 +1594,10 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         Runs optional spectral warping, the fitted ``input_transform``
         state, and the legacy ``standardize`` path (each confined to
         the leading :meth:`_n_transform_cols` columns so dual-input
-        models never transform their packed side block). This is the
-        single source of truth for inference preprocessing: both
-        :meth:`_forward_logits` and the estimators in
+        models never transform their packed side block) through
+        :func:`~maldideepkit.base.data.apply_fitted_preprocessing`.
+        This is the single entry point for inference preprocessing:
+        both :meth:`_forward_logits` and the estimators in
         :mod:`maldideepkit.uncertainty` go through it.
 
         Parameters
@@ -997,36 +1613,23 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         """
         X_np = _to_numpy(X)
         self._check_input_dim(X_np)
-        n_tc = self._n_transform_cols()
-        if getattr(self, "warper_", None) is not None:
-            from .data import _transform_leading_cols, _warp_numpy
-
-            X_np = _transform_leading_cols(
-                X_np, n_tc, lambda A: _warp_numpy(self.warper_, A)
-            )
-        state = getattr(self, "input_transform_state_", None)
-        if state is not None and state.get("mode", "none") != "none":
-            from .data import _transform_leading_cols, apply_input_transform
-
-            X_np = _transform_leading_cols(
-                X_np, n_tc, lambda A: apply_input_transform(A, state)
-            )
-        elif self.standardize and getattr(self, "feature_mean_", None) is not None:
-            from .data import _STD_FLOOR, _transform_leading_cols
-
-            safe_std = np.maximum(self.feature_std_, _STD_FLOOR).astype(np.float32)
-            X_np = _transform_leading_cols(
-                X_np, n_tc, lambda A: (A - self.feature_mean_) / safe_std
-            )
-        return X_np.astype(np.float32, copy=False)
+        return apply_fitted_preprocessing(
+            X_np,
+            warper=getattr(self, "warper_", None),
+            input_transform_state=getattr(self, "input_transform_state_", None),
+            standardize=bool(self.standardize),
+            feature_mean=getattr(self, "feature_mean_", None),
+            feature_std=getattr(self, "feature_std_", None),
+            n_transform_cols=self._n_transform_cols(),
+        )
 
     def _forward_logits(self, X: Any) -> np.ndarray:
         check_is_fitted(self, "model_")
         X_np = self._preprocess_input(X)
         device = self._device_
         self.model_.eval()
-        # Batch inference so large test folds don't OOM on attention
-        # architectures.
+        # Batch inference so large test folds do not run out of memory
+        # on attention architectures.
         X_t_full = torch.from_numpy(X_np.astype(np.float32)).to(device)
         chunk = int(getattr(self, "batch_size", 32))
         chunk = max(1, chunk)
@@ -1043,6 +1646,69 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         if logits.ndim == 1:
             logits = logits.reshape(-1, 1)
         return logits
+
+    def get_embeddings(self, X: Any) -> np.ndarray:
+        """Return the embeddings that the final layer of the model reads.
+
+        The counterpart of
+        :meth:`maldideepkit.pretraining.MaldiSpectrumEncoder.transform` for
+        a fitted classifier: the fitted preprocessing is applied first.
+        For a dual-input classifier these are the fused features of the
+        two branches.
+
+        Parameters
+        ----------
+        X : array-like or MaldiSet of shape (n_samples, n_bins)
+            Raw input spectra (plus packed side features for dual-input
+            models).
+
+        Returns
+        -------
+        ndarray of shape (n_samples, feature_dim)
+            ``float32`` embeddings (``eval`` mode, batched by
+            ``batch_size``).
+        """
+        check_is_fitted(self, "model_")
+        X_np = self._preprocess_input(X)
+        split = split_trunk(self.model_, int(self.input_dim_))
+        self.model_.eval()
+        X_t = torch.from_numpy(X_np.astype(np.float32))
+        chunk = max(1, int(self.batch_size))
+        parts: list[torch.Tensor] = []
+        with torch.no_grad():
+            for start in range(0, X_t.shape[0], chunk):
+                rows = X_t[start : start + chunk].to(self._device_)
+                parts.append(split.features(rows).float())
+        if not parts:
+            return np.empty((0, split.feature_dim), dtype=np.float32)
+        return torch.cat(parts).cpu().numpy()
+
+    @classmethod
+    def from_spectrum(
+        cls, bin_width: int, input_dim: int, **overrides: Any
+    ) -> BaseSpectralClassifier:
+        """Construct a classifier for a given ``(bin_width, input_dim)`` layout.
+
+        The default forwards ``input_dim`` and ``**overrides`` only. The
+        classifiers whose architecture depends on the bin width override
+        it to scale their parameters.
+
+        Parameters
+        ----------
+        bin_width : int
+            Bin width in Daltons (e.g. 3 for the MaldiAMRKit default).
+        input_dim : int
+            Number of bins in the input.
+        **overrides
+            Any other constructor argument.
+
+        Returns
+        -------
+        BaseSpectralClassifier
+            An unfitted estimator.
+        """
+        del bin_width
+        return cls(**{"input_dim": input_dim, **overrides})
 
     def predict_proba(self, X: Any) -> np.ndarray:
         """Return softmax class probabilities of shape ``(n_samples, n_classes)``.
@@ -1124,48 +1790,101 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         if isinstance(params.get("class_weight"), np.ndarray):
             params["class_weight"] = params["class_weight"].tolist()
         params["warping"] = None if params.get("warping") is None else "<provided>"
+        # A checkpoint path is stored absolute: the one resolved at fit
+        # time (``init_from_provenance``) when available, so a later
+        # change of working directory cannot redirect it. An in-memory
+        # encoder cannot be serialised (see ``init_from_provenance`` in
+        # save()).
+        provenance = getattr(self, "_init_from_provenance", None) or {}
+        fit_path = provenance.get("path")
+        init_from = params.get("init_from")
+        if init_from is not None:
+            params["init_from"] = (
+                (fit_path or str(Path(init_from).expanduser().resolve()))
+                if isinstance(init_from, (str, os.PathLike))
+                else None
+            )
         for key, value in params.items():
             if isinstance(value, BaseSpectralClassifier):
                 # Estimator-valued hyperparameters (e.g. the dual-branch
                 # ``backbone``) are stored as a reconstructable spec.
-                params[key] = {
-                    "__estimator__": type(value).__name__,
-                    "params": value._hparam_dict(),
-                }
+                sub_params = value._hparam_dict()
+                if (
+                    init_from is None
+                    and fit_path is not None
+                    and isinstance(sub_params.get("init_from"), str)
+                ):
+                    # The dual-branch classifier resolves its template's
+                    # ``init_from`` and keeps the provenance itself.
+                    sub_params["init_from"] = fit_path
+                params[key] = _estimator_spec(value, sub_params)
+            else:
+                # A SpectrumAugment ``augment`` is stored as its class
+                # path plus constructor parameters.
+                params[key] = _encode_param(key, value)
         return params
+
+    def _saved_class_path(self) -> str | None:
+        """Return the import path for :meth:`load`, or ``None`` if it cannot be used.
+
+        Only ``BaseSpectralClassifier.load`` needs it: ``Cls.load`` knows
+        the class, so a class that cannot be re-imported (a local class,
+        a notebook cell run again) still saves.
+        """
+        try:
+            return _importable_class_path(
+                type(self), BaseSpectralClassifier, "classifier", "class"
+            )
+        except ValueError:
+            return None
 
     def save(self, path: str | Path) -> None:
         """Persist the fitted estimator to ``path.pt`` + ``path.json``.
 
         The PyTorch state dict is written to ``<path>.pt`` and the
         hyperparameters plus fitted metadata to ``<path>.json``. A
-        single ``.pt`` or ``.json`` suffix on ``path`` is stripped
-        so ``clf.save("model")`` and ``clf.save("model.pt")`` produce
-        the same pair of files.
+        single ``.pt``, ``.pth``, ``.json``, or ``.warper.pkl`` suffix
+        on ``path`` is stripped so ``clf.save("model")`` and
+        ``clf.save("model.pt")`` produce the same pair of files; any
+        other dot is kept, so ``clf.save("lr0.05")`` writes
+        ``lr0.05.pt``. When the last :meth:`fit` used
+        ``init_from``, ``meta["init_from_provenance"]`` records the
+        encoder checkpoint (absolute path and sha256 of its ``.pt``,
+        both ``None`` for an in-memory encoder); it is ``None``
+        otherwise.
+
+        An object hyperparameter (``loss``, ``optimizer``, ``scheduler``,
+        ``callbacks``, ``augment``) is stored by import path, plus
+        constructor parameters for an instance: its class or function
+        must be defined at module level in an importable module (a lambda
+        cannot be saved), and an instance must keep each required
+        constructor argument in an attribute of the same name. Clear a
+        parameter that cannot be saved, e.g.
+        ``set_params(callbacks=None)``, before :meth:`save`; the weights
+        do not depend on it. The metadata is serialised before any file
+        is written and every file goes through a temporary name, so a
+        failing :meth:`save` writes nothing.
 
         Parameters
         ----------
         path : str or Path
             Base path without extension.
+
+        Raises
+        ------
+        TypeError
+            If an object hyperparameter does not keep a required
+            constructor argument in an attribute of the same name.
+        ValueError
+            If the class or function of a hyperparameter cannot be
+            re-imported from its import path (e.g. a local class or a
+            lambda).
         """
         check_is_fitted(self, "model_")
-        base = Path(path)
-        if base.suffix in {".pt", ".pth", ".json"}:
-            base = base.with_suffix("")
-        base.parent.mkdir(parents=True, exist_ok=True)
-
-        torch.save(self.model_.state_dict(), base.with_suffix(".pt"))
         warper = getattr(self, "warper_", None)
-        warper_path = base.with_suffix(".warper.pkl")
-        if warper is not None:
-            import joblib
-
-            joblib.dump(warper, warper_path)
-        elif warper_path.exists():
-            warper_path.unlink()
-
         meta: dict[str, Any] = {
             "class_name": type(self).__name__,
+            "class_path": self._saved_class_path(),
             "version": 2,
             "hparams": self._hparam_dict(),
             "fitted": {
@@ -1189,19 +1908,49 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
                 "input_transform_state_": _serialise_transform_state(
                     getattr(self, "input_transform_state_", None)
                 ),
+                "trunk_unfroze_": getattr(self, "trunk_unfroze_", None),
+                "best_epoch_phase_": getattr(self, "best_epoch_phase_", None),
             },
+            "init_from_provenance": getattr(self, "_init_from_provenance", None),
         }
-        with open(base.with_suffix(".json"), "w") as fh:
-            json.dump(meta, fh, indent=2)
+        _write_checkpoint(
+            _checkpoint_base(path),
+            self.model_.state_dict(),
+            json.dumps(meta, indent=2),
+            warper,
+        )
 
     @classmethod
-    def load(cls, path: str | Path) -> BaseSpectralClassifier:
+    def load(cls, path: str | Path, *, trusted: bool = False) -> BaseSpectralClassifier:
         """Load a saved estimator from a ``save()``-produced pair of files.
+
+        The saved weights are restored as they are: ``init_from`` is
+        kept as a parameter but never re-applied. A classifier saved
+        with a fitted warper keeps its ``warping`` as an unfitted copy
+        of the loaded warper (``None`` when that warper cannot be
+        cloned). Checkpoints written by v0.3.0 under a dotted base name
+        (``save("lr0.05")`` wrote ``lr0.pt`` there) still load: when
+        ``<path>.pt`` does not exist but the v0.3.0 file name does and
+        its ``.json`` was written before v0.4.0 (it has no
+        ``"init_from_provenance"`` key), the latter is used and a
+        ``UserWarning`` naming it is emitted. A v0.4.0 file under the
+        v0.3.0 name is another checkpoint, so the requested name raises
+        :class:`FileNotFoundError`.
 
         Parameters
         ----------
         path : str or Path
-            Base path (``.pt``/``.json`` suffix optional).
+            Base path given to :meth:`save` (a single ``.pt``, ``.pth``,
+            ``.json``, or ``.warper.pkl`` suffix is stripped).
+        trusted : bool, default=False
+            With the default, no new module is imported: every class
+            named by the checkpoint must come from MaldiDeepKit or from
+            an imported module. An object given as ``optimizer``,
+            ``scheduler``, ``loss`` or ``callbacks`` must also be a torch
+            module, optimizer or scheduler, or a ``Callback``, and a
+            function must be defined in MaldiDeepKit or in
+            ``torch.nn.functional``. ``True`` lifts these limits, for
+            checkpoints from a trusted source.
 
         Returns
         -------
@@ -1212,22 +1961,55 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         Raises
         ------
         ValueError
-            If the JSON file identifies a different class from ``cls``.
+            If the JSON file identifies a different class from ``cls``,
+            or names a class or a function that the ``trusted`` rule
+            refuses or that cannot be imported.
         FileNotFoundError
-            If either ``.pt`` or ``.json`` is missing.
+            If the ``.pt``, the ``.json``, or a required ``.warper.pkl``
+            is missing.
+
+        Notes
+        -----
+        A ``.warper.pkl`` is a pickle, read whatever ``trusted`` is:
+        load checkpoints with a warper only from trusted sources.
         """
-        base = Path(path)
-        if base.suffix in {".pt", ".pth", ".json"}:
-            base = base.with_suffix("")
-        pt_path = base.with_suffix(".pt")
-        json_path = base.with_suffix(".json")
+        base = _checkpoint_base(path)
+        pt_path = _checkpoint_file(base, ".pt")
+        json_path = _checkpoint_file(base, ".json")
+        warper_path = _checkpoint_file(base, ".warper.pkl")
+        legacy_pt = base.with_suffix(".pt")
+        meta: dict[str, Any] | None = None
+        if not pt_path.exists() and legacy_pt != pt_path and legacy_pt.exists():
+            # v0.3.0 named the files with ``with_suffix``, so a dotted
+            # base such as ``"model_0.05"`` was written as ``model_0.pt``.
+            # Every later classifier save writes ``init_from_provenance``
+            # and every encoder save ``kind``: such a file is another
+            # checkpoint, not the requested one.
+            legacy_json = base.with_suffix(".json")
+            if not legacy_json.exists():
+                raise FileNotFoundError(pt_path)
+            with open(legacy_json) as fh:
+                meta = json.load(fh)
+            if "init_from_provenance" in meta or "kind" in meta:
+                raise FileNotFoundError(pt_path)
+            warnings.warn(
+                f"{pt_path} does not exist; loading the v0.3.0 checkpoint "
+                f"{legacy_pt} instead (v0.3.0 dropped the last dotted part of "
+                "the name). Save it again to store it under the requested name.",
+                UserWarning,
+                stacklevel=2,
+            )
+            pt_path = legacy_pt
+            json_path = legacy_json
+            warper_path = base.with_suffix(".warper.pkl")
         if not pt_path.exists():
             raise FileNotFoundError(pt_path)
         if not json_path.exists():
             raise FileNotFoundError(json_path)
 
-        with open(json_path) as fh:
-            meta = json.load(fh)
+        if meta is None:
+            with open(json_path) as fh:
+                meta = json.load(fh)
 
         if cls is not BaseSpectralClassifier and meta["class_name"] != cls.__name__:
             raise ValueError(
@@ -1238,11 +2020,19 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         registry = _classifier_registry()
         target_cls = cls
         if cls is BaseSpectralClassifier:
-            if meta["class_name"] not in registry:
-                raise ValueError(f"Unknown saved class: {meta['class_name']!r}")
-            target_cls = registry[meta["class_name"]]
+            if meta["class_name"] in registry:
+                target_cls = registry[meta["class_name"]]
+            elif meta.get("class_path") is not None:
+                target_cls = _import_class(
+                    meta["class_path"],
+                    BaseSpectralClassifier,
+                    "classifier",
+                    trusted=trusted,
+                )
+            else:
+                raise ValueError(f"Unknown saved class: {meta['class_name']!r}.")
 
-        hparams = _decode_hparams(dict(meta["hparams"]), registry)
+        hparams = _decode_hparams(dict(meta["hparams"]), registry, trusted=trusted)
         instance = target_cls(**hparams)
         fitted = meta["fitted"]
         instance.input_dim_ = int(fitted["input_dim_"])
@@ -1261,6 +2051,11 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         )
         instance.threshold_ = fitted.get("threshold_")
         instance.temperature_ = fitted.get("temperature_")
+        # Absent from checkpoints written before v0.4.0.
+        for name in ("trunk_unfroze_", "best_epoch_phase_"):
+            if fitted.get(name) is not None:
+                setattr(instance, name, fitted[name])
+        instance._init_from_provenance = meta.get("init_from_provenance")
         instance.input_transform_state_ = _deserialise_transform_state(
             fitted.get("input_transform_state_")
         )
@@ -1268,10 +2063,17 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         if fitted.get("has_warper"):
             import joblib
 
-            warper_path = base.with_suffix(".warper.pkl")
             if not warper_path.exists():
                 raise FileNotFoundError(warper_path)
             instance.warper_ = joblib.load(warper_path)
+            # Refit and clone read ``warping``, which the JSON cannot hold:
+            # restore it as an unfitted copy of the loaded warper. A warper
+            # that cannot be cloned (fitted by an older maldiamrkit) leaves
+            # it at ``None``, as before.
+            try:
+                instance.warping = clone(instance.warper_)
+            except (AttributeError, TypeError):
+                instance.warping = None
 
         device = resolve_device(instance.device)
         model = instance._build_model().to(device)
@@ -1285,7 +2087,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
     def __sklearn_is_fitted__(self) -> bool:
         return hasattr(self, "model_")
 
-    def __sklearn_tags__(self):  # pragma: no cover - sklearn >=1.6 tag plumbing
+    def __sklearn_tags__(self):  # pragma: no cover (scikit-learn >= 1.6)
         try:
             tags = super().__sklearn_tags__()
         except AttributeError:
@@ -1297,7 +2099,7 @@ class BaseSpectralClassifier(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
         tags.non_deterministic = False
         return tags
 
-    def _more_tags(self) -> dict[str, Any]:  # pragma: no cover - sklearn <1.6
+    def _more_tags(self) -> dict[str, Any]:  # pragma: no cover (scikit-learn < 1.6)
         return {
             "binary_only": False,
             "multioutput": False,

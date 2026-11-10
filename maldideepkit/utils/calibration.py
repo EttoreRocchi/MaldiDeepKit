@@ -1,8 +1,8 @@
-"""Post-hoc calibration helpers used by :class:`BaseSpectralClassifier`.
+"""Post-hoc calibration helpers used by :class:`~maldideepkit.BaseSpectralClassifier`.
 
 - :func:`tune_threshold` picks the binary decision threshold on a
   validation set that maximises a chosen metric.
-- :func:`fit_temperature` optimises a single temperature scalar by
+- :func:`fit_temperature` optimizes a single temperature scalar by
   LBFGS on held-out logits for probability calibration.
 """
 
@@ -36,8 +36,8 @@ def tune_threshold(
         given, column index ``1`` is used.
     metric : {"balanced_accuracy", "f1", "youden"}, default="balanced_accuracy"
         Which metric to maximise. ``"youden"`` = TPR - FPR.
-    sample_weight : array-like of shape (n_samples,), optional
-        Per-sample weights forwarded to the underlying sklearn metric
+    sample_weight : array-like of shape (n_samples,) or None, default=None
+        Per-sample weights forwarded to the underlying scikit-learn metric
         (``balanced_accuracy_score``, ``f1_score``, ``roc_curve``).
 
     Returns
@@ -117,7 +117,7 @@ def fit_temperature(
         LBFGS max iterations.
     lr : float, default=1e-1
         LBFGS step size.
-    sample_weight : torch.Tensor or ndarray of shape (n_samples,), optional
+    sample_weight : torch.Tensor or ndarray of shape (n_samples,) or None, default=None
         Per-sample weights. When given, the NLL minimised by LBFGS
         becomes ``sum_i sw_i * ce_i / sum_i sw_i``.
 

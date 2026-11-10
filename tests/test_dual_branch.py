@@ -190,17 +190,24 @@ def test_dual_branch_with_cnn_backbone(dual_data):
     assert clf.predict(dual_data["X"]).shape == (dual_data["X"].shape[0],)
 
 
-def test_dual_branch_rejects_invalid_backbone():
+@pytest.mark.parametrize(
+    ("backbone", "error", "match"),
+    [
+        ("not-a-classifier", ValueError, "Unknown backbone"),
+        (object(), TypeError, "BaseSpectralClassifier"),
+    ],
+)
+def test_dual_branch_rejects_invalid_backbone(backbone, error, match):
     clf = MaldiDualBranchClassifier(
         n_spec_bins=24,
-        backbone="not-a-classifier",
+        backbone=backbone,
         epochs=1,
         batch_size=8,
     )
     rng = np.random.default_rng(0)
     X = rng.standard_normal((40, 40)).astype(np.float32)
     y = rng.integers(0, 2, size=40).astype(np.int64)
-    with pytest.raises(TypeError, match="BaseSpectralClassifier"):
+    with pytest.raises(error, match=match):
         clf.fit(X, y)
 
 

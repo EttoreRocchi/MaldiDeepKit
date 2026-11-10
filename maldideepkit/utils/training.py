@@ -1,9 +1,9 @@
-"""Generic training primitives used by :class:`BaseSpectralClassifier`."""
+"""Generic training primitives used by :class:`~maldideepkit.BaseSpectralClassifier`."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
@@ -11,8 +11,44 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from ..augment.mixing import apply_cutmix, apply_mixup, to_one_hot
+from .callbacks import dispatch
 from .loss import _gather_cw_per_sample, _weighted_loss_reduce
 from .sam import SAMOptimizer
+
+AMP_DTYPES = ("float16", "bfloat16", "auto")
+
+
+def resolve_amp_dtype(amp_dtype: str, device: torch.device) -> torch.dtype:
+    """Return the autocast dtype of an ``amp_dtype`` parameter on ``device``.
+
+    ``"auto"`` resolves to ``bfloat16`` on a GPU that supports it,
+    else to ``float16``.
+
+    Parameters
+    ----------
+    amp_dtype : {"float16", "bfloat16", "auto"}
+        Requested mixed-precision dtype.
+    device : torch.device
+        Training device.
+
+    Returns
+    -------
+    torch.dtype
+        ``torch.float16`` or ``torch.bfloat16``.
+
+    Raises
+    ------
+    ValueError
+        If ``amp_dtype`` is not one of :data:`AMP_DTYPES`.
+    """
+    if amp_dtype not in AMP_DTYPES:
+        raise ValueError(
+            f"Unknown amp_dtype={amp_dtype!r}; expected one of {AMP_DTYPES}."
+        )
+    if amp_dtype == "auto":
+        bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
+        return torch.bfloat16 if bf16 else torch.float16
+    return torch.bfloat16 if amp_dtype == "bfloat16" else torch.float16
 
 
 class EarlyStopping:
@@ -39,6 +75,10 @@ class EarlyStopping:
         update).
     best_state : dict or None
         CPU copy of the model ``state_dict`` at the best epoch.
+    best_epoch : int or None
+        0-based index of the :meth:`step` call that produced
+        :attr:`best_state` (the epoch index in :func:`train_loop`, which
+        steps once per epoch); ``None`` before the first improvement.
     should_stop : bool
         ``True`` once ``patience`` epochs have elapsed without an
         improvement.
@@ -55,8 +95,10 @@ class EarlyStopping:
         self.min_delta_rel = min_delta_rel
         self.best_loss = float("inf")
         self.best_state: dict[str, torch.Tensor] | None = None
+        self.best_epoch: int | None = None
         self.should_stop = False
         self._stale = 0
+        self._n_steps = 0
 
     def step(self, val_loss: float, model: nn.Module) -> bool:
         """Record ``val_loss`` and snapshot ``model`` if it improved.
@@ -73,6 +115,8 @@ class EarlyStopping:
         bool
             ``True`` if the loss improved this call.
         """
+        step = self._n_steps
+        self._n_steps += 1
         if math.isfinite(self.best_loss):
             threshold = max(self.min_delta, self.min_delta_rel * abs(self.best_loss))
         else:
@@ -82,12 +126,24 @@ class EarlyStopping:
             self.best_state = {
                 k: v.detach().cpu().clone() for k, v in model.state_dict().items()
             }
+            self.best_epoch = step
             self._stale = 0
             return True
         self._stale += 1
         if self._stale >= self.patience:
             self.should_stop = True
         return False
+
+    def reset_patience(self) -> None:
+        """Restart the patience count, keeping the best loss and state.
+
+        Used when the training regime changes mid-run (e.g. the trunk
+        is unfrozen after a linear-probing phase), so the new phase
+        gets a full ``patience`` window while the best checkpoint of
+        the previous phase stays a candidate.
+        """
+        self._stale = 0
+        self.should_stop = False
 
 
 def train_loop(
@@ -119,6 +175,10 @@ def train_loop(
     ema_decay: float | None = None,
     class_weight_t: torch.Tensor | None = None,
     n_augment_cols: int | None = None,
+    on_epoch_start: Callable[[int, nn.Module], None] | None = None,
+    compiled_model: nn.Module | None = None,
+    amp_dtype: torch.dtype = torch.float16,
+    callbacks: Sequence[Any] = (),
 ) -> nn.Module:
     """Run a classic train + validate loop with early stopping.
 
@@ -145,8 +205,8 @@ def train_loop(
     early_stopping : EarlyStopping
         Tracks the best validation loss and stops training when stale.
     verbose : bool, default=False
-        If ``True``, prints one line per epoch.
-    on_epoch_end : callable, optional
+        If ``True``, print one line per epoch.
+    on_epoch_end : callable or None, default=None
         Called as ``on_epoch_end(epoch, val_loss)`` after each epoch.
     warmup_epochs : int, default=0
         If positive, linearly ramp each optimizer param group's learning
@@ -158,9 +218,9 @@ def train_loop(
         :func:`torch.nn.utils.clip_grad_norm_`.
     use_amp : bool, default=False
         If ``True`` and ``device.type == "cuda"``, run forward + loss
-        under :func:`torch.autocast` and use
-        :class:`torch.amp.GradScaler` for backward. On CPU this is a
-        no-op.
+        under :func:`torch.autocast` (``amp_dtype``) and, in
+        ``float16``, use :class:`torch.amp.GradScaler` for backward. On
+        CPU this is a no-op.
     swa_start_epoch : int or None, default=None
         If set, maintain a :class:`torch.optim.swa_utils.AveragedModel`
         starting at this epoch (0-indexed). At end of training,
@@ -170,11 +230,11 @@ def train_loop(
         :class:`~maldideepkit.utils.SAMOptimizer` and run the two-step
         SAM update (roughly doubles compute). Grad clipping is applied
         only on the second gradient.
-    metrics_recorder : callable, optional
+    metrics_recorder : callable or None, default=None
         If provided, called once per epoch with a dict containing
         ``{"epoch", "train_loss", "val_loss", "lr",
         "mean_grad_norm", "n_grad_updates"}``.
-    augment : callable, optional
+    augment : callable or None, default=None
         If provided, called on each training batch's feature tensor
         after it is moved to ``device`` but before the forward pass.
     mixup_alpha : float, default=0.0
@@ -185,9 +245,9 @@ def train_loop(
         When ``> 0``, apply CutMix on each training batch. When both
         ``mixup_alpha`` and ``cutmix_alpha`` are positive a fair coin
         picks between the two per batch.
-    n_classes : int, optional
+    n_classes : int or None, default=None
         Required when ``mixup_alpha > 0`` or ``cutmix_alpha > 0``.
-    mix_generator : torch.Generator, optional
+    mix_generator : torch.Generator or None, default=None
         Optional seeded RNG for MixUp / CutMix draws.
     ema_decay : float or None, default=None
         When set, maintain an exponential moving average of the
@@ -197,7 +257,7 @@ def train_loop(
     class_weight_t : torch.Tensor or None, default=None
         Per-class weight tensor (already moved to ``device``). When
         provided, it is used solely for the denominator gather in the
-        weighted-mean reduction so that the sklearn convention
+        weighted-mean reduction so that the scikit-learn convention
         "doubling sample_weight is equivalent to duplicating the row"
         composes correctly with class_weight. The actual per-class
         scaling of the per-sample loss is expected to be applied by
@@ -217,6 +277,27 @@ def train_loop(
         unaffected: it already convex-combines every column with a
         single shared ``lam``, which stays consistent with the mixed
         label. ``None`` treats every column as spectrum.
+    on_epoch_start : callable or None, default=None
+        Called as ``on_epoch_start(epoch, model)`` at the start of each
+        epoch, right after ``model.train()`` and before the first
+        batch, so it can switch sub-modules back to ``eval()`` or
+        toggle ``requires_grad`` for the epoch (e.g. trunk freezing).
+    compiled_model : nn.Module or None, default=None
+        Compiled wrapper of ``model`` (``torch.compile(model)``, sharing
+        its parameters) used for the training and validation forward
+        passes. Everything else (train / eval modes, early-stopping
+        snapshots, EMA / SWA averages, the returned module) uses
+        ``model`` itself, so no state dict carries the ``_orig_mod.``
+        prefix of the wrapper.
+    amp_dtype : torch.dtype, default=torch.float16
+        Autocast dtype when ``use_amp`` is active. ``torch.float16``
+        scales the loss with :class:`torch.amp.GradScaler`;
+        ``torch.bfloat16`` (the exponent range of ``float32``) runs
+        without one.
+    callbacks : sequence, default=()
+        Objects with the ``on_epoch_start``, ``on_step_end``, and
+        ``on_epoch_end`` hooks of :class:`~maldideepkit.utils.Callback`
+        (``on_train_start`` and ``on_train_end`` belong to the caller).
 
     Returns
     -------
@@ -239,6 +320,7 @@ def train_loop(
             "in FP32 (no AMP speedup). Disable one to silence.",
             stacklevel=2,
         )
+    forward = model if compiled_model is None else compiled_model
     if len(val_tensors) == 3:
         X_val, y_val, sw_val_t = val_tensors  # type: ignore[misc]
     else:
@@ -246,7 +328,11 @@ def train_loop(
         sw_val_t = None
     base_lrs = [pg["lr"] for pg in optimizer.param_groups]
     amp_enabled = bool(use_amp) and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
+    scaler = (
+        torch.amp.GradScaler("cuda")
+        if amp_enabled and amp_dtype == torch.float16
+        else None
+    )
     swa_model: torch.optim.swa_utils.AveragedModel | None = None
     swa_updated = False
     ema_model: torch.optim.swa_utils.AveragedModel | None = None
@@ -268,17 +354,22 @@ def train_loop(
         norms = torch._foreach_norm(grads, 2.0)
         return float(torch.linalg.vector_norm(torch.stack(norms)).item())
 
+    step = 0
     for epoch in range(epochs):
         if warmup_epochs > 0 and epoch < warmup_epochs:
             scale = (epoch + 1) / warmup_epochs
             for pg, base in zip(optimizer.param_groups, base_lrs, strict=True):
                 pg["lr"] = base * scale
+        epoch_lr = float(optimizer.param_groups[0]["lr"])
 
         epoch_loss_sum = 0.0
         epoch_grad_norm_sum = 0.0
         epoch_n_updates = 0
 
         model.train()
+        if on_epoch_start is not None:
+            on_epoch_start(epoch, model)
+        dispatch(callbacks, "on_epoch_start", model, epoch)
         for batch in train_loader:
             if len(batch) == 3:
                 xb, yb, sw_b = batch
@@ -336,12 +427,12 @@ def train_loop(
                         f"got {type(optimizer).__name__}."
                     )
                 optimizer.zero_grad()
-                logits = model(xb)
+                logits = forward(xb)
                 loss = _reduce(criterion(logits, yb_target))
                 loss.backward()
                 optimizer.first_step(zero_grad=True)
 
-                logits = model(xb)
+                logits = forward(xb)
                 loss = _reduce(criterion(logits, yb_target))
                 loss.backward()
                 if metrics_recorder is not None or grad_clip_norm is not None:
@@ -352,25 +443,31 @@ def train_loop(
                         torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_norm)
                 optimizer.second_step(zero_grad=True)
             elif amp_enabled:
-                assert scaler is not None
                 optimizer.zero_grad()
-                with torch.autocast(device_type="cuda"):
-                    logits = model(xb)
+                with torch.autocast(device_type="cuda", dtype=amp_dtype):
+                    logits = forward(xb)
                     per_sample = criterion(logits, yb_target)
                 loss = _reduce(per_sample.float())
-                scaler.scale(loss).backward()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
                 if grad_clip_norm is not None or metrics_recorder is not None:
-                    scaler.unscale_(optimizer)
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
                     params = [p for g in optimizer.param_groups for p in g["params"]]
                     if metrics_recorder is not None:
                         epoch_grad_norm_sum += _compute_grad_norm(params)
                     if grad_clip_norm is not None:
                         torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
             else:
                 optimizer.zero_grad()
-                logits = model(xb)
+                logits = forward(xb)
                 loss = _reduce(criterion(logits, yb_target))
                 loss.backward()
                 if metrics_recorder is not None or grad_clip_norm is not None:
@@ -385,16 +482,18 @@ def train_loop(
                 ema_model.update_parameters(model)
                 ema_updated = True
 
-            if metrics_recorder is not None:
+            if metrics_recorder is not None or callbacks:
                 epoch_loss_sum += float(loss.detach().item())
                 epoch_n_updates += 1
+            dispatch(callbacks, "on_step_end", model, step)
+            step += 1
 
         model.eval()
         val_cw_per_sample = _gather_cw_per_sample(y_val, class_weight_t)
         with torch.no_grad():
             if amp_enabled:
-                with torch.autocast(device_type="cuda"):
-                    val_logits = model(X_val)
+                with torch.autocast(device_type="cuda", dtype=amp_dtype):
+                    val_logits = forward(X_val)
                     val_per_sample = criterion(val_logits, y_val)
                 val_loss = float(
                     _weighted_loss_reduce(
@@ -402,7 +501,7 @@ def train_loop(
                     ).item()
                 )
             else:
-                val_logits = model(X_val)
+                val_logits = forward(X_val)
                 val_per_sample = criterion(val_logits, y_val)
                 val_loss = float(
                     _weighted_loss_reduce(
@@ -440,6 +539,17 @@ def train_loop(
                     "n_grad_updates": int(epoch_n_updates),
                 }
             )
+        dispatch(
+            callbacks,
+            "on_epoch_end",
+            model,
+            epoch,
+            {
+                "train_loss": epoch_loss_sum / max(1, epoch_n_updates),
+                "val_loss": float(val_loss),
+                "lr": epoch_lr,
+            },
+        )
         if early_stopping.should_stop:
             break
 

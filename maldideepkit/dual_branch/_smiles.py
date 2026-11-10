@@ -54,8 +54,8 @@ def smiles_to_fingerprint(
         from rdkit.Chem import rdFingerprintGenerator
     except ImportError as exc:
         raise ImportError(
-            "smiles_to_fingerprint requires the optional RDKit extra. "
-            "Install via:  pip install 'maldideepkit[rdkit]'"
+            "smiles_to_fingerprint requires the optional RDKit extra "
+            "(pip install 'maldideepkit[rdkit]')."
         ) from exc
 
     generator = rdFingerprintGenerator.GetMorganGenerator(

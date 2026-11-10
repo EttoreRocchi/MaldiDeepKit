@@ -152,6 +152,18 @@ class TestSideEffects:
         assert clf.feature_std_ is not None
         assert clf.feature_mean_.shape == (X.shape[1],)
 
+    def test_init_from_warns(self, synthetic_binary):
+        X, y = synthetic_binary
+        with pytest.warns(UserWarning, match="find_lr ignores init_from"):
+            find_lr(
+                _tiny_clf(init_from="encoder"),
+                X,
+                y,
+                num_iter=5,
+                start_lr=1e-5,
+                end_lr=1e-3,
+            )
+
 
 class TestReproducibility:
     def test_same_seed_same_curve(self, synthetic_binary):

@@ -121,6 +121,11 @@ class SpectralResNet1D(nn.Module):
         to reproduce the literal ResNet-18 backbone.
     dropout : float, default=0.2
         Dropout applied after global average pooling.
+
+    Attributes
+    ----------
+    feature_dim : int
+        Width of :meth:`forward_features` (``stage_channels[-1]``).
     """
 
     def __init__(
@@ -178,15 +183,24 @@ class SpectralResNet1D(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(prev, n_classes)
         self.input_dim = input_dim
+        self.feature_dim = prev
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Map ``(batch, input_dim)`` to ``(batch, n_classes)`` logits."""
+    @property
+    def final_layer(self) -> nn.Module:
+        """Output layer mapping :meth:`forward_features` to the logits."""
+        return self.fc
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(batch, input_dim)`` to ``(batch, feature_dim)`` features."""
         x = x.unsqueeze(1)
         x = self.stem(x)
         x = self.stages(x)
         x = self.gap(x).squeeze(-1)
-        x = self.dropout(x)
-        return self.fc(x)
+        return self.dropout(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(batch, input_dim)`` to ``(batch, n_classes)`` logits."""
+        return self.fc(self.forward_features(x))
 
 
 class MaldiResNetClassifier(BaseSpectralClassifier):
@@ -218,11 +232,34 @@ class MaldiResNetClassifier(BaseSpectralClassifier):
         reproduce the literal ResNet-18 backbone.
     dropout : float, default=0.2
         Dropout before the final linear layer.
+    init_from : str, path-like, MaldiSpectrumEncoder or None, default=None
+        Self-supervised encoder (checkpoint path or fitted instance)
+        whose trunk initialises the model, with its fitted
+        preprocessing inherited; see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    freeze_trunk_epochs : int, default=0
+        Number of initial epochs training only the final layer
+        (LP-FT); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    torch_compile : bool, default=False
+        Train through ``torch.compile`` (the fitted module, checkpoints,
+        and inference stay uncompiled); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    amp_dtype : {"float16", "bfloat16", "auto"}, default="float16"
+        Autocast dtype of ``use_amp=True`` (``"bfloat16"`` cannot
+        overflow and needs no ``GradScaler``); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    optimizer : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    scheduler : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    callbacks : Callback, sequence of Callback or None, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
 
     Notes
     -----
     Every parameter accepted by
-    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    :class:`~maldideepkit.BaseSpectralClassifier`
     (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
     ``calibrate_temperature``, ``device``, ``random_state``, ...) is
     forwarded to the base class. The ResNet defaults pre-set
@@ -259,6 +296,7 @@ class MaldiResNetClassifier(BaseSpectralClassifier):
         self,
         input_dim: int | None = None,
         n_classes: int = 2,
+        *,
         stem_channels: int = 32,
         stage_channels: tuple[int, ...] = (64, 128, 256, 512),
         blocks_per_stage: tuple[int, ...] = (2, 2, 2, 2),
@@ -271,7 +309,7 @@ class MaldiResNetClassifier(BaseSpectralClassifier):
         weight_decay: float = 1e-4,
         grad_clip_norm: float | None = 1.0,
         label_smoothing: float = 0.0,
-        loss: str = "cross_entropy",
+        loss: Any = "cross_entropy",
         focal_gamma: float = 2.0,
         use_amp: bool = False,
         swa_start_epoch: int | None = None,
@@ -301,6 +339,13 @@ class MaldiResNetClassifier(BaseSpectralClassifier):
         device: str | torch.device = "auto",
         random_state: int = 0,
         verbose: bool = False,
+        init_from: str | Path | Any | None = None,
+        freeze_trunk_epochs: int = 0,
+        torch_compile: bool = False,
+        amp_dtype: str = "float16",
+        optimizer: Any = None,
+        scheduler: Any = None,
+        callbacks: Any = None,
     ) -> None:
         super().__init__(
             input_dim=input_dim,
@@ -339,6 +384,13 @@ class MaldiResNetClassifier(BaseSpectralClassifier):
             device=device,
             random_state=random_state,
             verbose=verbose,
+            init_from=init_from,
+            freeze_trunk_epochs=freeze_trunk_epochs,
+            torch_compile=torch_compile,
+            amp_dtype=amp_dtype,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            callbacks=callbacks,
         )
         self.stem_channels = stem_channels
         self.stage_channels = stage_channels
@@ -349,31 +401,50 @@ class MaldiResNetClassifier(BaseSpectralClassifier):
         self.use_stem_pool = use_stem_pool
         self.dropout = dropout
 
+    def _arch_params(self) -> dict[str, Any]:
+        return {
+            "stem_channels": int(self.stem_channels),
+            "stage_channels": tuple(self.stage_channels),
+            "blocks_per_stage": tuple(self.blocks_per_stage),
+            "stem_kernel_size": int(self.stem_kernel_size),
+            "stem_stride": int(self.stem_stride),
+            "block_kernel_size": int(self.block_kernel_size),
+            "use_stem_pool": bool(self.use_stem_pool),
+            "dropout": float(self.dropout),
+        }
+
     def _build_model(self) -> nn.Module:
         return SpectralResNet1D(
             input_dim=self.input_dim_,
             n_classes=self.n_classes_,
-            stem_channels=int(self.stem_channels),
-            stage_channels=tuple(self.stage_channels),
-            blocks_per_stage=tuple(self.blocks_per_stage),
-            stem_kernel_size=int(self.stem_kernel_size),
-            stem_stride=int(self.stem_stride),
-            block_kernel_size=int(self.block_kernel_size),
-            use_stem_pool=bool(self.use_stem_pool),
-            dropout=float(self.dropout),
+            **self._arch_params(),
         )
 
     @classmethod
     def from_spectrum(
         cls, bin_width: int, input_dim: int, **overrides
     ) -> "MaldiResNetClassifier":
-        """Construct a peak-friendly ResNet for a given spectrum layout.
+        """Construct a classifier with ``stem_kernel_size`` scaled for ``bin_width``.
 
         Scales ``stem_kernel_size`` inversely with ``bin_width``
         relative to the package reference (``bin_width=3``,
         ``stem_kernel_size=7``). Also sets ``stem_stride=1`` and
-        ``use_stem_pool=False`` (the class defaults). Any keyword in
-        ``**overrides`` wins over the auto-selected values.
+        ``use_stem_pool=False`` (the class defaults).
+
+        Parameters
+        ----------
+        bin_width : int
+            Bin width in Daltons (e.g. 3 for the MaldiAMRKit default).
+        input_dim : int
+            Number of bins in the input.
+        **overrides
+            Any other constructor argument; it wins over the scaled
+            value.
+
+        Returns
+        -------
+        MaldiResNetClassifier
+            An unfitted estimator.
         """
         kwargs: dict[str, Any] = {
             "input_dim": input_dim,

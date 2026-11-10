@@ -2,11 +2,10 @@
 
 :class:`MaldiDualBranchClassifier` conditions classification on both
 the spectrum and a per-row side feature (e.g. an antibiotic
-fingerprint). The side feature is packed into ``X`` by concatenation
-so the resulting class behaves like any other
-:class:`maldideepkit.BaseSpectralClassifier` from sklearn's
-perspective (``GridSearchCV``, ``Pipeline``, and ``cross_val_score``
-all work out of the box).
+fingerprint). The side feature is packed into ``X`` by concatenation,
+so for scikit-learn the resulting class is like any other
+:class:`~maldideepkit.BaseSpectralClassifier` (``GridSearchCV``,
+``Pipeline``, and ``cross_val_score`` all accept it).
 """
 
 from __future__ import annotations
@@ -19,7 +18,10 @@ import torch
 from sklearn.base import clone
 from torch import nn
 
-from ..base.classifier import BaseSpectralClassifier
+from ..base._registry import get_backbone_class
+from ..base._serialization import _estimator_spec
+from ..base._trunk import split_trunk, trunk_prefix
+from ..base.classifier import BaseSpectralClassifier, _load_init_encoder
 from ..base.dual import BaseDualSpectralClassifier
 
 __all__ = ["MaldiDualBranchClassifier"]
@@ -61,12 +63,11 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
 
     1. **Spectral branch**: default a small MLP
        ``Linear -> ReLU -> Dropout -> ... -> Linear -> ReLU``. When
-       ``backbone=`` is supplied (a
-       :class:`maldideepkit.BaseSpectralClassifier` instance), the
-       backbone's ``_build_model()`` is invoked, the final
-       :class:`torch.nn.Linear` is replaced with
-       :class:`torch.nn.Identity`, and the remaining module is used as
-       a feature extractor.
+       ``backbone=`` is supplied (a registered name or a
+       :class:`~maldideepkit.BaseSpectralClassifier` instance), the
+       backbone's ``_build_model()`` is invoked, its final layer is
+       replaced with :class:`torch.nn.Identity`, and the remaining
+       module is used as a feature extractor.
     2. **Side branch**: small MLP
        ``Linear -> ReLU -> Dropout -> ... -> Linear -> ReLU``.
     3. **Fused head**: ``Linear(d_spec_feat + d_side_feat, n_classes)``.
@@ -74,7 +75,9 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
     Parameters
     ----------
     n_spec_bins : int
-        Number of spectrum-side feature columns in ``X``. Required.
+        Number of spectrum columns at the start of ``X``; the remaining
+        ``X.shape[1] - n_spec_bins`` columns are the side input.
+        Required.
     spec_hidden_dims : sequence of int, default=(256, 128)
         Hidden-layer widths of the **default** spectral-branch MLP.
         Ignored when ``backbone=`` is supplied. Last entry is the
@@ -87,34 +90,69 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
         the output dim of the side branch.
     fp_dropout : float, default=0.2
         Dropout between hidden layers of the side-branch MLP.
-    backbone : maldideepkit.BaseSpectralClassifier or None, default=None
-        When supplied, used as the spectral branch (head replaced by
+    backbone : str, maldideepkit.BaseSpectralClassifier or None, default=None
+        When supplied, a name (see
+        :func:`~maldideepkit.pretraining.register_backbone`) or an instance used as
+        the spectral branch (head replaced by
         :class:`torch.nn.Identity` so the module returns features).
         When ``None``, the built-in MLP from ``spec_hidden_dims`` is
-        used.
-    **kwargs
-        Forwarded to :class:`BaseSpectralClassifier` /
-        :class:`BaseDualSpectralClassifier`. See those docstrings for
-        the full hyperparameter list (``learning_rate``,
-        ``batch_size``, ``epochs``, ``warping``, ...).
+        used, or the architecture of the encoder given as ``init_from``.
+    init_from : str, path-like, MaldiSpectrumEncoder or None, default=None
+        Initialises the spectral branch from the trunk of this encoder at
+        :meth:`fit`, and the spectral columns inherit its fitted
+        preprocessing (checked against **this** classifier's
+        ``standardize`` / ``input_transform`` / ``warping`` and
+        ``n_spec_bins``, since the dual classifier owns the
+        preprocessing). It may instead be set on the ``backbone=``
+        template, but not on both. A path is loaded with the default
+        ``trusted=False``; for a trusted checkpoint, pass
+        ``MaldiSpectrumEncoder.load(path, trusted=True)``. A
+        ``.warper.pkl`` is a pickle, read whatever ``trusted`` is: load
+        checkpoints with a warper only from trusted sources.
+    freeze_trunk_epochs : int, default=0
+        Linear probing then fine-tuning (LP-FT): the spectral branch is
+        frozen for the first epochs, while the side branch and the
+        fusion head train. A non-zero value on the ``backbone=`` template
+        is used when this one is ``0``.
+    torch_compile : bool, default=False
+        Train through ``torch.compile`` (the fitted module, checkpoints,
+        and inference stay uncompiled); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    amp_dtype : {"float16", "bfloat16", "auto"}, default="float16"
+        Autocast dtype of ``use_amp=True`` (``"bfloat16"`` cannot
+        overflow and needs no ``GradScaler``); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    optimizer : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    scheduler : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    callbacks : Callback, sequence of Callback or None, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
 
     Notes
     -----
+    Every parameter accepted by
+    :class:`~maldideepkit.BaseSpectralClassifier` (e.g.
+    ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
+    ``device``, ``random_state``, ...) is forwarded to the base class.
+    See its docstring for the full list.
+
     The class inherits everything from
-    :class:`BaseDualSpectralClassifier`, which inherits from
-    :class:`BaseSpectralClassifier`. ``sklearn.base.clone`` is fully
-    supported.
+    :class:`~maldideepkit.BaseDualSpectralClassifier`, which inherits
+    from :class:`~maldideepkit.BaseSpectralClassifier`.
+    :func:`~sklearn.base.clone` works on it.
 
     Spectrum-specific preprocessing stops at the ``n_spec_bins``
     boundary: ``warping``, ``standardize``, ``input_transform``,
-    ``augment`` and ``cutmix_alpha`` act on the spectrum columns only,
+    ``augment``, and ``cutmix_alpha`` act on the spectrum columns only,
     leaving the side block untouched (``mixup_alpha`` mixes both
     blocks with one shared ``lam``, which stays consistent with the
     mixed label). So ``input_transform="log1p"`` will not rewrite
     binary fingerprint bits, and a CutMix window cannot straddle the
     spectrum / side boundary. Preprocessing you *want* applied to the
     side block belongs in an upstream ``Pipeline`` step. See
-    :class:`BaseDualSpectralClassifier` for the full breakdown.
+    :class:`~maldideepkit.BaseDualSpectralClassifier` for the full
+    breakdown.
 
     Examples
     --------
@@ -160,7 +198,7 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
         weight_decay: float = 0.0,
         grad_clip_norm: float | None = None,
         label_smoothing: float = 0.0,
-        loss: str = "cross_entropy",
+        loss: Any = "cross_entropy",
         focal_gamma: float = 2.0,
         use_amp: bool = False,
         swa_start_epoch: int | None = None,
@@ -190,6 +228,13 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
         device: str | torch.device = "auto",
         random_state: int = 0,
         verbose: bool = False,
+        init_from: str | Path | Any | None = None,
+        freeze_trunk_epochs: int = 0,
+        torch_compile: bool = False,
+        amp_dtype: str = "float16",
+        optimizer: Any = None,
+        scheduler: Any = None,
+        callbacks: Any = None,
     ) -> None:
         super().__init__(
             n_spec_bins=n_spec_bins,
@@ -229,12 +274,102 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
             device=device,
             random_state=random_state,
             verbose=verbose,
+            init_from=init_from,
+            freeze_trunk_epochs=freeze_trunk_epochs,
+            torch_compile=torch_compile,
+            amp_dtype=amp_dtype,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            callbacks=callbacks,
         )
         self.spec_hidden_dims = spec_hidden_dims
         self.spec_dropout = spec_dropout
         self.fp_hidden_dims = fp_hidden_dims
         self.fp_dropout = fp_dropout
         self.backbone = backbone
+
+    def _resolve_init_encoder(self) -> Any | None:
+        """Resolve ``init_from``, set here or on the ``backbone=`` template.
+
+        The encoder is checked against this (outer) classifier's
+        preprocessing config and ``n_spec_bins``, because the dual
+        classifier owns the preprocessing of the spectral columns. Without
+        a ``backbone=``, the spectral branch takes the architecture of the
+        encoder (:attr:`spectral_template_`).
+        """
+        self._init_from_provenance = None
+        self.__dict__.pop("spectral_template_", None)
+        template = self._spectral_template()
+        template_from = getattr(template, "init_from", None)
+        if self.init_from is not None and template_from is not None:
+            raise ValueError(
+                "init_from is set both on this classifier and on its backbone= "
+                "template: set it on one of them."
+            )
+        init_from = self.init_from if self.init_from is not None else template_from
+        if init_from is None:
+            return None
+        encoder, provenance = _load_init_encoder(init_from)
+        self._check_init_encoder(encoder, int(self.n_spec_bins))
+        self._init_from_provenance = provenance
+        if template is None:
+            self.spectral_template_ = clone(encoder.backbone_template_)
+        return encoder
+
+    def _spectral_template(self) -> Any:
+        """Return the ``backbone=`` template, a name being resolved to its class."""
+        if isinstance(self.backbone, str):
+            return get_backbone_class(self.backbone)()
+        return self.backbone
+
+    def _frozen_epochs(self) -> int:
+        """Return this classifier's ``freeze_trunk_epochs``, else the template's."""
+        own = int(self.freeze_trunk_epochs)
+        if own != 0:
+            return own
+        return int(getattr(self._spectral_template(), "freeze_trunk_epochs", 0))
+
+    def _hparam_dict(self) -> dict[str, Any]:
+        """Store the architecture derived from the encoder as the ``backbone``."""
+        params = super()._hparam_dict()
+        derived = getattr(self, "spectral_template_", None)
+        if self.backbone is None and derived is not None:
+            params["backbone"] = _estimator_spec(derived)
+        return params
+
+    @classmethod
+    def from_spectrum(
+        cls, bin_width: int, input_dim: int, **overrides: Any
+    ) -> MaldiDualBranchClassifier:
+        """Construct a classifier for ``input_dim`` spectrum bins.
+
+        A ``backbone`` given by name is built with the ``from_spectrum``
+        of its class, so its architecture is scaled for ``bin_width``.
+
+        Parameters
+        ----------
+        bin_width : int
+            Bin width in Daltons.
+        input_dim : int
+            Number of spectrum bins (``n_spec_bins``).
+        **overrides
+            Any other constructor argument.
+
+        Returns
+        -------
+        MaldiDualBranchClassifier
+            An unfitted estimator.
+        """
+        backbone = overrides.get("backbone")
+        if isinstance(backbone, str):
+            overrides["backbone"] = get_backbone_class(backbone).from_spectrum(
+                bin_width, input_dim
+            )
+        return super().from_spectrum(bin_width, input_dim, **overrides)
+
+    def _trunk_target(self, model: nn.Module) -> tuple[nn.Module, str | None]:
+        """Return the spectral branch; its final layer is already an Identity."""
+        return model.inner.spectral, None
 
     def _build_dual_model(
         self,
@@ -254,7 +389,10 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
         n_classes: int,
     ) -> tuple[nn.Module, int]:
         """Build the spectral branch + return its output dim."""
-        if self.backbone is None:
+        template = self._spectral_template()
+        if template is None:
+            template = getattr(self, "spectral_template_", None)
+        if template is None:
             return self._build_default_mlp(
                 input_dim_spec,
                 hidden_dims=tuple(self.spec_hidden_dims),
@@ -263,18 +401,18 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
 
         # User backbone path: clone, force input_dim_/n_classes_, build,
         # then replace the head with Identity to expose features.
-        if not isinstance(self.backbone, BaseSpectralClassifier):
+        if not isinstance(template, BaseSpectralClassifier):
             raise TypeError(
-                f"backbone= must be a BaseSpectralClassifier instance "
-                f"(got {type(self.backbone).__name__}). Pass an instance "
-                "such as MaldiMLPClassifier() or MaldiCNNClassifier()."
+                f"backbone= must be a name or a BaseSpectralClassifier instance; "
+                f"got {type(template).__name__}. Pass a name such as 'cnn' or "
+                "an instance such as MaldiMLPClassifier()."
             )
-        bb = clone(self.backbone)
+        bb = clone(template)
         bb.input_dim_ = int(input_dim_spec)
         bb.n_classes_ = int(n_classes)
         full = bb._build_model()
-        spec_out = self._find_last_linear_in_features(full)
-        spec = self._replace_last_linear_with_identity(full)
+        spec_out = self._find_last_linear_in_features(full, int(input_dim_spec))
+        spec = self._replace_last_linear_with_identity(full, int(input_dim_spec))
         return spec, spec_out
 
     def _build_side_branch(
@@ -313,35 +451,34 @@ class MaldiDualBranchClassifier(BaseDualSpectralClassifier):
         return nn.Sequential(*layers), int(hidden_dims[-1])
 
     @staticmethod
-    def _replace_last_linear_with_identity(module: nn.Module) -> nn.Module:
-        """Replace the final :class:`nn.Linear` in ``module`` with Identity."""
-        last_parent = None
-        last_name = None
-        for name, sub in module.named_modules():
-            if isinstance(sub, nn.Linear):
-                parent_path, _, last_name = name.rpartition(".")
-                last_parent = (
-                    module if parent_path == "" else module.get_submodule(parent_path)
-                )
-        if last_parent is None or last_name is None:
-            raise RuntimeError(
-                "MaldiDualBranchClassifier could not locate a final "
-                f"nn.Linear in the spectral branch "
-                f"{type(module).__name__}."
-            )
-        setattr(last_parent, last_name, nn.Identity())
+    def _replace_last_linear_with_identity(
+        module: nn.Module, input_dim: int | None = None
+    ) -> nn.Module:
+        """Replace the final layer of ``module`` with Identity (in place).
+
+        Uses ``module.final_layer`` when the module defines it (the
+        built-in backbones); otherwise the final :class:`nn.Linear` of a
+        custom module. The lookup is
+        :func:`~maldideepkit.base._trunk.trunk_prefix`, shared with the
+        encoder and ``init_from``.
+        """
+        parent_path, _, name = trunk_prefix(module, input_dim).rpartition(".")
+        parent = module if parent_path == "" else module.get_submodule(parent_path)
+        setattr(parent, name, nn.Identity())
         return module
 
     @staticmethod
-    def _find_last_linear_in_features(module: nn.Module) -> int:
-        """Return the ``in_features`` of the last :class:`nn.Linear` in ``module``."""
-        last = None
-        for sub in module.modules():
-            if isinstance(sub, nn.Linear):
-                last = sub
-        if last is None:
-            raise RuntimeError(
-                "Could not infer spectral feature dim: backbone module "
-                "has no nn.Linear layer."
-            )
-        return int(last.in_features)
+    def _find_last_linear_in_features(
+        module: nn.Module, input_dim: int | None = None
+    ) -> int:
+        """Return the spectral feature width of ``module``.
+
+        Uses ``module.feature_dim`` when the module defines it together
+        with ``final_layer`` (the built-in backbones, whose final layer
+        :meth:`_replace_last_linear_with_identity` swaps out); otherwise
+        falls back to the ``in_features`` of the final :class:`nn.Linear`
+        of ``module`` (custom modules), so the width always matches the
+        layer that is actually replaced (see
+        :func:`~maldideepkit.base._trunk.split_trunk`).
+        """
+        return split_trunk(module, input_dim).feature_dim

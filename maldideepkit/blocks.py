@@ -1,8 +1,8 @@
 """One-stop import path for every MaldiDeepKit ``nn.Module`` primitive.
 
 Re-exports the full backbones and composable primitives under a single
-namespace so users embedding components into their own networks don't
-have to know the per-family layout.
+namespace, so users embedding components into their own networks do
+not have to know the per-family layout.
 
 Examples
 --------

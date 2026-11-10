@@ -69,7 +69,7 @@ class UncertaintyResult:
         Hard labels drawn from the classifier's :attr:`classes_`.
     proba_mean : ndarray of shape (n_samples, n_classes)
         Mean softmax probabilities. For non-Bayesian methods this is
-        simply the classifier's :meth:`predict_proba` output.
+        the classifier's :meth:`predict_proba` output.
     uncertainty : ndarray of shape (n_samples,)
         Scalar per-sample uncertainty in ``[0, 1]`` where possible. The
         precise semantics are method-specific and documented on the

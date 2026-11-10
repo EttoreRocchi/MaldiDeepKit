@@ -5,23 +5,24 @@
    :width: 280px
    :class: only-light
 
-.. image:: _static/maldideepkit_logo.png
+.. image:: _static/maldideepkit_logo_dark.png
    :align: center
    :width: 280px
    :class: only-dark
 
 .. rst-class:: hero-section
 
-MaldiDeepKit Documentation
+MaldiDeepKit documentation
 ==========================
 
-A catalog of sklearn-compatible deep learning classifiers for MALDI-TOF
-mass spectrometry. Four PyTorch backbone architectures (MLP with
-optional sigmoid-gated attention, 1-D CNN, 1-D ResNet, and 1-D Vision
-Transformer) plus a dual-branch classifier for spectrum + side-feature
-inputs and a self-training meta-classifier for semi-supervised data,
-all wrapped in a unified estimator API with defaults calibrated for
-~6000-bin MALDI-TOF input.
+A catalogue of sklearn-compatible deep learning classifiers for MALDI-TOF
+mass spectrometry: four PyTorch backbones (MLP with optional
+sigmoid-gated attention, 1-D CNN, 1-D ResNet, and 1-D Vision
+Transformer), a dual-branch classifier for a spectrum plus side
+features, a self-training classifier for partly labelled data, and a
+self-supervised encoder that pre-trains the backbones on unlabelled
+spectra. All of them share one estimator API, with defaults set for
+~6000-bin MALDI-TOF spectra.
 
 .. container:: sd-d-flex-row sd-flex-justify-content-center sd-gap-2 sd-mb-4
 
@@ -36,33 +37,33 @@ all wrapped in a unified estimator API with defaults calibrated for
       :outline:
       :shadow:
 
-      API Reference
+      API reference
 
    .. button-link:: quickstart.html
       :color: primary
       :outline:
       :shadow:
 
-      Quickstart Guide
+      Quickstart guide
 
 ----
 
-Key Features
+Key features
 ------------
 
 .. grid:: 2 2 3 3
    :gutter: 3
    :class-container: feature-grid
 
-   .. grid-item-card:: Four Architectures
+   .. grid-item-card:: Four architectures
       :link: api/index.html
       :link-type: url
 
       MLP with optional attention, 1-D CNN, 1-D ResNet, and 1-D Vision
-      Transformer (all calibrated for ~6000-bin MALDI-TOF spectra
-      out of the box).
+      Transformer (all with defaults set for ~6000-bin MALDI-TOF
+      spectra).
 
-   .. grid-item-card:: Sklearn-Compatible
+   .. grid-item-card:: Compatible with scikit-learn
       :link: quickstart.html#fitting-a-classifier
       :link-type: url
 
@@ -70,55 +71,55 @@ Key Features
       ``score`` / ``get_params`` / ``set_params`` and plugs into
       ``Pipeline``, ``cross_val_score``, and ``GridSearchCV``.
 
-   .. grid-item-card:: MaldiSet Integration
+   .. grid-item-card:: MaldiSet integration
       :link: quickstart.html#integration-with-maldiamrkit
       :link-type: url
 
       Pass a :class:`maldiamrkit.MaldiSet` directly to ``fit`` / ``predict``;
-      MaldiDeepKit duck-types on the DataFrame-like ``.X`` attribute, so
-      MaldiSuite's data model flows end-to-end.
+      MaldiDeepKit reads its DataFrame-like ``.X`` attribute.
 
-   .. grid-item-card:: Attention Inspection
+   .. grid-item-card:: Attention inspection
       :link: quickstart.html#inspecting-attention-weights
       :link-type: url
 
       ``MaldiMLPClassifier`` exposes per-sample sigmoid-gated attention
-      via ``attention_weights_`` and ``get_attention_weights(X)``.
+      through ``attention_weights_`` and ``get_attention_weights(X)``.
 
-   .. grid-item-card:: Training Recipes Built-in
+   .. grid-item-card:: Built-in training recipes
       :link: quickstart.html#training-recipe-and-lr-schedule
       :link-type: url
 
-      Linear warmup + cosine annealing, AdamW-on-weight-decay dispatch,
-      gradient clipping, AMP, SWA, focal-loss, and threshold tuning. Deep
-      models (ResNet / Transformer) ship with the recipes they need to
-      converge out of the box.
+      Linear warmup and cosine annealing, AdamW when ``weight_decay > 0``,
+      gradient clipping, AMP, SWA, focal loss, and threshold tuning. The
+      ResNet and Transformer defaults include the recipe they need to
+      converge.
 
-   .. grid-item-card:: Leak-Safe Spectral Warping
+   .. grid-item-card:: Leak-safe spectral warping
       :link: quickstart.html#spectral-warping-pre-scaling
       :link-type: url
 
-      Pass a ``Warping`` (or any sklearn transformer) via ``warping=``;
-      it's fitted on the training fold only and applied before
-      per-feature standardization during training *and* inference.
+      Pass a ``Warping`` (or any scikit-learn transformer) as
+      ``warping=``; it is fitted on the training split only and applied
+      before per-feature standardisation during training *and*
+      inference.
 
-   .. grid-item-card:: Auto-Scaling
+   .. grid-item-card:: Auto-scaling
       :link: spectrum_scaling.html
       :link-type: url
 
-      ``Classifier.from_spectrum(bin_width, input_dim)`` rescales
-      conv kernels and patches when the spectrum layout deviates from
-      the reference 6000-bin / 3 Da default.
+      ``Classifier.from_spectrum(bin_width, input_dim)`` rescales the
+      conv kernels when the spectrum layout deviates from the reference
+      6000-bin / 3 Da default.
 
-   .. grid-item-card:: Calibration & Threshold Tuning
+   .. grid-item-card:: Calibration and threshold tuning
       :link: quickstart.html#probability-calibration
       :link-type: url
 
       Post-hoc temperature scaling and balanced-accuracy / F1 / Youden
-      threshold tuning on the validation split, all togglable via
-      classifier kwargs.
+      threshold tuning on the validation split, both switched on
+      through classifier parameters.
 
-   .. grid-item-card:: Uncertainty Quantification
+   .. grid-item-card:: Uncertainty quantification
       :link: api/uncertainty.html
       :link-type: url
 
@@ -126,40 +127,50 @@ Key Features
       ``predict_with_uncertainty`` interface: Monte Carlo Dropout,
       Laplace approximation, and split conformal prediction (LAC).
 
-   .. grid-item-card:: Reproducible Training
+   .. grid-item-card:: Self-supervised pre-training
+      :link: api/pretraining.html
+      :link-type: url
+
+      ``MaldiSpectrumEncoder`` pre-trains any backbone on unlabelled
+      spectra (masked reconstruction, intensity-weighted bin shuffling,
+      or contrastive views); classifiers start from it with ``init_from=`` and
+      optional linear probing (``freeze_trunk_epochs=``).
+
+   .. grid-item-card:: Reproducible training
       :link: api/base.html
       :link-type: url
 
       Shared ``BaseSpectralClassifier`` seeds Python, NumPy, and PyTorch
-      from ``random_state`` so identical configs produce identical
-      weights and predictions.
+      from ``random_state``, so on CPU, with the same number of threads,
+      identical configurations produce identical weights and predictions.
 
-   .. grid-item-card:: Strict Persistence
+   .. grid-item-card:: Strict persistence
       :link: quickstart.html#persistence
       :link-type: url
 
       ``save()`` writes a state-dict ``.pt`` + hyperparameter ``.json``
-      pair (and a sibling ``.warper.pkl`` if a warper was fitted);
-      ``load()`` fails fast on class or ``input_dim`` mismatches.
+      pair (and a ``.warper.pkl`` when a warper was fitted); ``load()``
+      raises on a class mismatch, and ``predict`` on a wrong number of
+      bins.
 
-   .. grid-item-card:: CPU-Friendly
+   .. grid-item-card:: GPU or CPU
       :link: installation.html
       :link-type: url
 
-      CPU fallback is fully supported and is what the project's CI runs
-      against; CUDA significantly speeds up training across all four
-      architectures.
+      With the default ``device="auto"``, every classifier trains on a
+      CUDA GPU when one is available and on CPU otherwise.
 
-   .. grid-item-card:: MaldiSuite Ecosystem
+   .. grid-item-card:: MaldiSuite ecosystem
       :link: papers.html
       :link-type: url
 
-      Sibling of ``MaldiAMRKit`` (preprocessing) and ``MaldiBatchKit``
-      (batch correction), three packages sharing the same data model.
+      Part of MaldiSuite with ``MaldiAMRKit`` and ``MaldiBatchKit``: three
+      packages that share the ``MaldiSet`` data model and can be used on
+      their own or together.
 
 ----
 
-Quick Example
+Quick example
 -------------
 
 .. code-block:: python
@@ -177,9 +188,9 @@ Quick Example
    proba = clf.predict_proba(X)
    weights = clf.get_attention_weights(X[:10])   # (10, hidden_dim)
 
-Train/test without leakage (the optional spectral warper is fit on
-the training fold only and applied to held-out samples via the same
-fitted parameters at ``predict`` time):
+Train/test without leakage (the optional spectral warper is fitted
+on the training split only and applied to held-out samples with the
+same fitted parameters at ``predict`` time):
 
 .. code-block:: python
 
@@ -204,7 +215,7 @@ fitted parameters at ``predict`` time):
 .. toctree::
    :maxdepth: 2
    :hidden:
-   :caption: Get Started
+   :caption: Get started
 
    installation
    quickstart

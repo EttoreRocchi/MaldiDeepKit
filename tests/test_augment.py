@@ -115,6 +115,33 @@ class TestSpectrumAugmentDomainOps:
         y = aug(x)
         torch.testing.assert_close(y.sum(dim=1), x.sum(dim=1))
 
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param(
+                "cuda",
+                marks=[
+                    pytest.mark.gpu,
+                    pytest.mark.skipif(
+                        not torch.cuda.is_available(), reason="needs CUDA"
+                    ),
+                ],
+            ),
+        ],
+    )
+    def test_mz_shift_equals_per_row_roll(self, device):
+        """The vectorised shift is row i rolled by its drawn shift, bit for bit."""
+        aug = SpectrumAugment(mz_shift_max_bins=4, random_state=3)
+        x = torch.randn(16, 50, device=device)
+        y = aug(x)
+        gen = torch.Generator(device=device).manual_seed(3)
+        shifts = torch.randint(-4, 5, (16,), generator=gen, device=device).tolist()
+        expected = torch.stack(
+            [torch.roll(x[i], shifts=s, dims=0) for i, s in enumerate(shifts)]
+        )
+        assert torch.equal(y, expected)
+
     def test_mz_shift_changes_output_for_nonzero_k(self):
         aug = SpectrumAugment(mz_shift_max_bins=5, random_state=0)
         x = torch.arange(64, dtype=torch.float32).expand(8, 64).clone()

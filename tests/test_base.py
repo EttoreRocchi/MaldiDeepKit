@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import train_test_split
 
 from maldideepkit import (
     BaseSpectralClassifier,
@@ -16,6 +19,14 @@ from maldideepkit import (
     MaldiMLPClassifier,
     SpectralDataset,
     make_loaders,
+)
+from maldideepkit.base._config import same_config
+from maldideepkit.base.data import (
+    _warp_numpy,
+    apply_fitted_preprocessing,
+    apply_input_transform,
+    fit_input_transform,
+    resolve_transform_mode,
 )
 from maldideepkit.utils.reproducibility import resolve_device, seed_everything
 from maldideepkit.utils.training import EarlyStopping, train_loop
@@ -96,6 +107,308 @@ class TestMakeLoaders:
         assert len(list(tr)) >= 1
 
 
+class _MeanShiftWarper(BaseEstimator, TransformerMixin):
+    """Deterministic warper: ``fit`` stores the column mean, ``transform`` subtracts it."""
+
+    def fit(self, X, y=None):
+        self.ref_ = np.asarray(X, dtype=np.float32).mean(axis=0)
+        return self
+
+    def transform(self, X):
+        df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(np.asarray(X))
+        return pd.DataFrame(df.to_numpy() - self.ref_, index=df.index)
+
+
+class _NoFitWarper(_MeanShiftWarper):
+    def fit(self, X, y=None):
+        raise AssertionError("fit() must not be called")
+
+
+def _strip_v040_marker(json_path):
+    """Make a checkpoint ``.json`` look written by v0.3.0 (no v0.4.0 key)."""
+    meta = json.loads(json_path.read_text())
+    del meta["init_from_provenance"]
+    json_path.write_text(json.dumps(meta))
+
+
+def _split_indices(y, val_size, random_state):
+    """Row indices of the stratified split used by ``make_loaders``."""
+    return train_test_split(
+        np.arange(len(y)), test_size=val_size, random_state=random_state, stratify=y
+    )
+
+
+class TestResolveTransformMode:
+    @pytest.mark.parametrize(
+        ("standardize", "input_transform", "expected"),
+        [
+            (False, None, "none"),
+            (True, None, "standardize"),
+            (False, "standardize", "standardize"),
+            (True, "standardize", "standardize"),
+            (True, "log1p", "log1p"),
+            (False, "log1p+standardize", "log1p+standardize"),
+            (True, "none", "none"),
+            (False, "robust", "robust"),
+        ],
+    )
+    def test_table(self, standardize, input_transform, expected):
+        assert resolve_transform_mode(standardize, input_transform) == expected
+
+
+class TestSharedPreprocessing:
+    @pytest.mark.parametrize(
+        ("mode", "use_warper"),
+        [
+            ("none", False),
+            ("standardize", False),
+            ("log1p+standardize", True),
+            ("robust", True),
+        ],
+    )
+    def test_default_path_bitwise_unchanged(self, synthetic_binary, mode, use_warper):
+        """The default ``make_loaders`` path equals the v0.3.0 pipeline bit for bit."""
+        X, y = synthetic_binary
+        X = np.abs(X)
+        warper = _MeanShiftWarper() if use_warper else None
+        tr, val, stats = make_loaders(
+            X,
+            y,
+            batch_size=8,
+            val_size=0.25,
+            random_state=3,
+            input_transform=mode,
+            warper=warper,
+        )
+        X_tr, X_val = train_test_split(X, test_size=0.25, random_state=3, stratify=y)
+        if use_warper:
+            ref_warper = _MeanShiftWarper().fit(pd.DataFrame(X_tr))
+            X_tr = _warp_numpy(ref_warper, X_tr)
+            X_val = _warp_numpy(ref_warper, X_val)
+        state = fit_input_transform(X_tr, mode)
+        assert torch.equal(
+            tr.dataset.X, torch.from_numpy(apply_input_transform(X_tr, state))
+        )
+        assert torch.equal(
+            val.dataset.X, torch.from_numpy(apply_input_transform(X_val, state))
+        )
+        assert stats["input_transform_state"]["mode"] == mode
+
+    def test_fitted_preprocessing_matches_manual(self, synthetic_binary):
+        X, y = synthetic_binary
+        X = np.abs(X)
+        warper = _MeanShiftWarper().fit(pd.DataFrame(X[:20]))
+        state = fit_input_transform(_warp_numpy(warper, X[:20]), "log1p+standardize")
+        tr, val, stats = make_loaders(
+            X,
+            y,
+            batch_size=8,
+            val_size=0.25,
+            random_state=1,
+            standardize=True,
+            input_transform="robust",
+            warper=_NoFitWarper(),
+            fitted_preprocessing={"warper": warper, "input_transform_state": state},
+        )
+        idx_tr, idx_val = _split_indices(y, 0.25, 1)
+        for loader, idx in ((tr, idx_tr), (val, idx_val)):
+            expected = apply_input_transform(_warp_numpy(warper, X[idx]), state)
+            assert torch.equal(loader.dataset.X, torch.from_numpy(expected))
+        assert stats["warper"] is warper
+        assert stats["input_transform_state"] is state
+        assert stats["mean"] is state["mean"]
+        assert stats["std"] is state["std"]
+
+    def test_fitted_preprocessing_without_warper(self, synthetic_binary):
+        X, y = synthetic_binary
+        state = fit_input_transform(X[:10], "standardize")
+        tr, _, stats = make_loaders(
+            X,
+            y,
+            batch_size=8,
+            val_size=0.25,
+            random_state=0,
+            fitted_preprocessing={"input_transform_state": state},
+        )
+        idx_tr, _ = _split_indices(y, 0.25, 0)
+        expected = apply_input_transform(X[idx_tr], state)
+        assert torch.equal(tr.dataset.X, torch.from_numpy(expected))
+        assert stats["warper"] is None
+
+    def test_fitted_preprocessing_requires_state(self, synthetic_binary):
+        X, y = synthetic_binary
+        with pytest.raises(ValueError, match="input_transform_state"):
+            make_loaders(X, y, fitted_preprocessing={"warper": None})
+
+    def test_classifier_preprocess_input_delegates(self, synthetic_binary):
+        X, y = synthetic_binary
+        X = np.abs(X)
+        clf = MaldiMLPClassifier(
+            hidden_dim=8,
+            head_dims=(4,),
+            epochs=1,
+            batch_size=8,
+            input_transform="log1p+standardize",
+            warping=_MeanShiftWarper(),
+            random_state=0,
+        ).fit(X, y)
+        expected = apply_fitted_preprocessing(
+            X,
+            warper=clf.warper_,
+            input_transform_state=clf.input_transform_state_,
+            standardize=clf.standardize,
+            feature_mean=clf.feature_mean_,
+            feature_std=clf.feature_std_,
+        )
+        manual = apply_input_transform(
+            _warp_numpy(clf.warper_, X), clf.input_transform_state_
+        )
+        np.testing.assert_array_equal(clf._preprocess_input(X), expected)
+        np.testing.assert_array_equal(expected, manual)
+
+    def test_legacy_standardize_path(self, synthetic_binary):
+        """No ``input_transform_state``: fall back to ``feature_mean`` / ``feature_std``."""
+        X, _ = synthetic_binary
+        mean = X.mean(axis=0)
+        std = X.std(axis=0)
+        out = apply_fitted_preprocessing(
+            X,
+            input_transform_state=None,
+            standardize=True,
+            feature_mean=mean,
+            feature_std=std,
+        )
+        np.testing.assert_allclose(out, (X - mean) / std, rtol=1e-6)
+        assert out.dtype == np.float32
+        untouched = apply_fitted_preprocessing(
+            X, input_transform_state={"mode": "none"}
+        )
+        np.testing.assert_array_equal(untouched, X)
+
+    def test_n_transform_cols_confines_preprocessing(self, synthetic_binary):
+        X, _ = synthetic_binary
+        state = {"mode": "log1p"}
+        out = apply_fitted_preprocessing(
+            np.abs(X), input_transform_state=state, n_transform_cols=100
+        )
+        np.testing.assert_array_equal(out[:, 100:], np.abs(X)[:, 100:])
+        np.testing.assert_array_equal(
+            out[:, :100], apply_input_transform(np.abs(X)[:, :100], state)
+        )
+
+
+class TestSameConfig:
+    def test_identical_warping_instances(self):
+        from maldiamrkit.alignment import Warping
+
+        a, b = Warping(), Warping()
+        # Plain parameter equality fails (a fresh MaldiPeakDetector each).
+        assert a.get_params(deep=False) != b.get_params(deep=False)
+        assert same_config(a, b)
+
+    def test_different_warping_method(self):
+        from maldiamrkit.alignment import Warping
+
+        assert not same_config(Warping(method="dtw"), Warping())
+        assert not same_config(Warping(), Warping(max_shift=10))
+
+    def test_fitted_vs_unfitted_warping(self):
+        from maldiamrkit.alignment import Warping
+
+        rng = np.random.default_rng(0)
+        X = np.abs(rng.standard_normal((12, 64))).astype(np.float32)
+        X[:, [5, 10, 20, 30, 40, 50]] += 10.0
+        fitted = Warping().fit(pd.DataFrame(X))
+        assert hasattr(fitted, "ref_spec_")
+        assert same_config(fitted, Warping())
+
+    def test_ignored_keys(self):
+        from maldiamrkit.alignment import Warping
+
+        assert same_config(Warping(n_jobs=1), Warping(n_jobs=4))
+        assert not same_config(
+            Warping(n_jobs=1), Warping(n_jobs=4), ignore=("verbose",)
+        )
+
+    def test_class_must_match(self):
+        from maldiamrkit.alignment import Warping
+
+        assert not same_config(Warping(), _MeanShiftWarper())
+        assert not same_config(Warping(), None)
+        assert same_config(None, None)
+
+    def test_recurses_into_pipeline_steps(self):
+        from maldiamrkit.alignment import Warping
+        from sklearn.pipeline import Pipeline
+
+        def pipe(method):
+            return Pipeline([("w", Warping(method=method)), ("s", _MeanShiftWarper())])
+
+        assert same_config(pipe("shift"), pipe("shift"))
+        assert not same_config(pipe("shift"), pipe("dtw"))
+
+    def test_arrays_and_plain_values(self):
+        from sklearn.preprocessing import FunctionTransformer
+
+        def ft(arr):
+            return FunctionTransformer(np.add, kw_args={"x2": arr})
+
+        assert same_config(ft(np.arange(3)), ft(np.arange(3)))
+        assert not same_config(ft(np.arange(3)), ft(np.arange(4)))
+        assert same_config((1, [2.0, "a"]), [1, (2.0, "a")])
+        assert same_config(float("nan"), float("nan"))
+        assert not same_config(1, 2)
+
+    def test_objects_without_get_params_fall_back_to_identity(self):
+        a, b = object(), object()
+        assert same_config(a, a)
+        assert not same_config(a, b)
+
+    def test_pandas_objects_compared_with_equals(self):
+        df = pd.DataFrame({"a": [1.0, np.nan], "b": [3, 4]})
+        assert same_config(df, df.copy())
+        assert not same_config(df, df.assign(b=[3, 5]))
+        assert same_config(pd.Series([1.0, np.nan]), pd.Series([1.0, np.nan]))
+        assert not same_config(pd.Series([1.0, 2.0]), pd.Series([1.0, 3.0]))
+        assert same_config(pd.Index(["x", "y"]), pd.Index(["x", "y"]))
+        assert not same_config(pd.Series([1.0]), pd.DataFrame({"a": [1.0]}))
+        assert not same_config(pd.Series([1.0]), np.array([1.0]))
+
+    def test_torch_tensors_compared_by_value(self):
+        assert same_config(torch.tensor([1.0, 2.0]), torch.tensor([1.0, 2.0]))
+        assert same_config(
+            torch.tensor([1.0, float("nan")]), torch.tensor([1.0, float("nan")])
+        )
+        assert not same_config(torch.tensor([1, 2]), torch.tensor([1, 3]))
+        assert not same_config(torch.tensor([1, 2]), torch.tensor([1.0, 2.0]))
+        assert not same_config(torch.tensor([1.0]), torch.tensor([[1.0]]))
+        assert not same_config(torch.tensor([1.0]), np.array([1.0]))
+
+    def test_numpy_random_generators_compared_by_state(self):
+        assert same_config(np.random.RandomState(0), np.random.RandomState(0))
+        assert not same_config(np.random.RandomState(0), np.random.RandomState(1))
+        assert same_config(np.random.default_rng(0), np.random.default_rng(0))
+        assert not same_config(np.random.default_rng(0), np.random.default_rng(1))
+        drawn = np.random.default_rng(0)
+        drawn.random()
+        assert not same_config(drawn, np.random.default_rng(0))
+        assert not same_config(np.random.RandomState(0), np.random.default_rng(0))
+
+    def test_special_values_inside_estimator_params(self):
+        from sklearn.preprocessing import FunctionTransformer
+
+        def ft(**kw_args):
+            return FunctionTransformer(np.add, kw_args=kw_args)
+
+        assert same_config(
+            ft(ref=pd.Series([1.0, 2.0]), rng=np.random.RandomState(3)),
+            ft(ref=pd.Series([1.0, 2.0]), rng=np.random.RandomState(3)),
+        )
+        assert not same_config(
+            ft(ref=pd.Series([1.0, 2.0])), ft(ref=pd.Series([1.0, 9.0]))
+        )
+
+
 class TestReproducibility:
     def test_seed_everything(self):
         seed_everything(42)
@@ -111,6 +424,10 @@ class TestReproducibility:
         # Save and restore so we leave the environment untouched.
         prev_env = os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
         prev_flag = torch.are_deterministic_algorithms_enabled()
+        prev_cudnn = (
+            torch.backends.cudnn.deterministic,
+            torch.backends.cudnn.benchmark,
+        )
         try:
             seed_everything(0, deterministic=True)
             assert os.environ.get("CUBLAS_WORKSPACE_CONFIG") == ":4096:8"
@@ -120,9 +437,13 @@ class TestReproducibility:
                 os.environ["CUBLAS_WORKSPACE_CONFIG"] = prev_env
             else:
                 os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
-            # Restore the deterministic flag so unrelated tests
-            # downstream don't hit the CuBLAS-warning path.
+            # Restore the deterministic flags so unrelated tests
+            # downstream don't hit the CuBLAS-warning path, nor run on a
+            # deterministic cuDNN they did not ask for.
             torch.use_deterministic_algorithms(prev_flag, warn_only=True)
+            torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = (
+                prev_cudnn
+            )
 
     def test_seed_everything_no_deterministic_by_default(self):
         """Plain ``seed_everything(seed)`` must not set the CUBLAS env var."""
@@ -746,6 +1067,70 @@ class TestSaveLoad:
         assert meta["class_name"] == "MaldiMLPClassifier"
         assert meta["fitted"]["input_dim_"] == X.shape[1]
         assert meta["fitted"]["n_classes_"] == 2
+
+    def test_dotted_base_names_stay_distinct(self, tmp_path, synthetic_binary):
+        X, y = synthetic_binary
+        clfs = {
+            name: MaldiMLPClassifier(
+                hidden_dim=16, head_dims=(8,), epochs=1, batch_size=8, random_state=seed
+            ).fit(X, y)
+            for name, seed in (("lr0.05", 0), ("lr0.10", 1))
+        }
+        for name, clf in clfs.items():
+            clf.save(tmp_path / name)
+        assert (tmp_path / "lr0.05.pt").exists() and (tmp_path / "lr0.10.json").exists()
+        assert not (tmp_path / "lr0.pt").exists()
+        assert not np.allclose(
+            clfs["lr0.05"].predict_proba(X), clfs["lr0.10"].predict_proba(X)
+        )
+        for name, clf in clfs.items():
+            for path in (name, f"{name}.pt", f"{name}.json"):
+                loaded = MaldiMLPClassifier.load(tmp_path / path)
+                np.testing.assert_allclose(
+                    loaded.predict_proba(X), clf.predict_proba(X), atol=1e-6
+                )
+
+    def test_legacy_dotted_checkpoint_still_loads(self, tmp_path, synthetic_binary):
+        X, y = synthetic_binary
+        clf = MaldiMLPClassifier(
+            hidden_dim=16,
+            head_dims=(8,),
+            epochs=1,
+            batch_size=8,
+            random_state=0,
+            warping=_MeanShiftWarper(),
+        ).fit(X, y)
+        clf.save(tmp_path / "lr0.05")
+        # v0.3.0 named the files of "lr0.05" with Path.with_suffix: lr0.*
+        for ext in (".pt", ".json", ".warper.pkl"):
+            os.replace(tmp_path / f"lr0.05{ext}", tmp_path / f"lr0{ext}")
+        _strip_v040_marker(tmp_path / "lr0.json")
+        for path in ("lr0.05", "lr0.05.pt"):
+            with pytest.warns(UserWarning, match=r"lr0\.pt instead"):
+                loaded = MaldiMLPClassifier.load(tmp_path / path)
+            np.testing.assert_array_equal(loaded.warper_.ref_, clf.warper_.ref_)
+            np.testing.assert_allclose(
+                loaded.predict_proba(X), clf.predict_proba(X), atol=1e-6
+            )
+
+    def test_legacy_name_of_a_v040_checkpoint_is_not_loaded(
+        self, tmp_path, synthetic_binary
+    ):
+        """``load("model_0.5")`` must not return the v0.4.0 ``model_0`` checkpoint."""
+        X, y = synthetic_binary
+        clf = MaldiMLPClassifier(
+            hidden_dim=16, head_dims=(8,), epochs=1, batch_size=8, random_state=0
+        ).fit(X, y)
+        clf.save(tmp_path / "model_0")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            for path in ("model_0.5", "model_0.5.pt"):
+                with pytest.raises(FileNotFoundError, match=r"model_0\.5\.pt"):
+                    BaseSpectralClassifier.load(tmp_path / path)
+        # A .pt under the v0.3.0 name without its .json is not used either.
+        os.remove(tmp_path / "model_0.json")
+        with pytest.raises(FileNotFoundError, match=r"model_0\.5\.pt"):
+            BaseSpectralClassifier.load(tmp_path / "model_0.5")
 
     def test_save_unfitted_raises(self, tmp_path):
         clf = MaldiMLPClassifier(

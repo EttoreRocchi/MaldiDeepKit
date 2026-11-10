@@ -25,6 +25,15 @@ class TestMaldiMLPClassifier:
         assert clf.attention_weights_ is not None
         assert clf.attention_weights_.shape[1] == 32
 
+    def test_get_attention_weights_returns_every_row(self, synthetic_binary):
+        X, y = synthetic_binary
+        clf = MaldiMLPClassifier(
+            hidden_dim=32, head_dims=(16,), epochs=1, batch_size=8, random_state=0
+        ).fit(X, y)
+        assert clf.get_attention_weights(X).shape == (len(X), 32)
+        clf.predict_proba(X[:20])
+        assert clf.attention_weights_.shape == (20, 32)
+
     def test_get_attention_weights(self, synthetic_binary):
         X, y = synthetic_binary
         clf = MaldiMLPClassifier(

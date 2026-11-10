@@ -80,6 +80,11 @@ class SpectralCNN1D(nn.Module):
     dropout : float, default=0.3
         Dropout applied inside every block and before the output layer.
 
+    Attributes
+    ----------
+    feature_dim : int
+        Width of :meth:`forward_features` (``head_dim``).
+
     Notes
     -----
     Input tensors have shape ``(batch, input_dim)`` and are unsqueezed to
@@ -122,12 +127,24 @@ class SpectralCNN1D(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(head_dim, n_classes),
         )
+        self.feature_dim = head_dim
+
+    @property
+    def final_layer(self) -> nn.Module:
+        """Output layer mapping :meth:`forward_features` to the logits."""
+        return self.head[-1]
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(batch, input_dim)`` to ``(batch, feature_dim)`` features."""
+        x = x.unsqueeze(1)
+        feat = self.backbone(x).flatten(1)
+        for layer in list(self.head)[:-1]:
+            feat = layer(feat)
+        return feat
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Map ``(batch, input_dim)`` to ``(batch, n_classes)`` logits."""
-        x = x.unsqueeze(1)
-        feat = self.backbone(x)
-        return self.head(feat.flatten(1))
+        return self.head[-1](self.forward_features(x))
 
 
 class MaldiCNNClassifier(BaseSpectralClassifier):
@@ -150,21 +167,44 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
         Width of the hidden dense layer.
     dropout : float, default=0.3
         Dropout applied inside every block and before the output layer.
+    init_from : str, path-like, MaldiSpectrumEncoder or None, default=None
+        Self-supervised encoder (checkpoint path or fitted instance)
+        whose trunk initialises the model, with its fitted
+        preprocessing inherited; see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    freeze_trunk_epochs : int, default=0
+        Number of initial epochs training only the final layer
+        (LP-FT); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    torch_compile : bool, default=False
+        Train through ``torch.compile`` (the fitted module, checkpoints,
+        and inference stay uncompiled); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    amp_dtype : {"float16", "bfloat16", "auto"}, default="float16"
+        Autocast dtype of ``use_amp=True`` (``"bfloat16"`` cannot
+        overflow and needs no ``GradScaler``); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    optimizer : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    scheduler : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    callbacks : Callback, sequence of Callback or None, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
 
     Notes
     -----
     Every parameter accepted by
-    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    :class:`~maldideepkit.BaseSpectralClassifier`
     (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
     ``calibrate_temperature``, ``device``, ``random_state``, ...) is
     forwarded to the base class. See its docstring for the full list.
 
     The flat dense head scales linearly with ``input_dim``; prefer
     :class:`~maldideepkit.MaldiResNetClassifier` or
-    :class:`~maldideepkit.MaldiTransformerClassifier` if you want
-    a head width that's independent of the input resolution.
+    :class:`~maldideepkit.MaldiTransformerClassifier` for a head width
+    independent of the input resolution.
 
-    See :func:`from_spectrum` for a factory that auto-scales
+    See :meth:`from_spectrum` for a factory that scales
     ``kernel_size`` for a given ``(bin_width, input_dim)`` layout.
 
     Examples
@@ -190,6 +230,7 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
         self,
         input_dim: int | None = None,
         n_classes: int = 2,
+        *,
         channels: tuple[int, ...] = (32, 64, 128, 128),
         kernel_size: int | Sequence[int] = 7,
         pool_size: int | Sequence[int] = 2,
@@ -199,7 +240,7 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
         weight_decay: float = 0.0,
         grad_clip_norm: float | None = None,
         label_smoothing: float = 0.0,
-        loss: str = "cross_entropy",
+        loss: Any = "cross_entropy",
         focal_gamma: float = 2.0,
         use_amp: bool = False,
         swa_start_epoch: int | None = None,
@@ -229,6 +270,13 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
         device: str | torch.device = "auto",
         random_state: int = 0,
         verbose: bool = False,
+        init_from: str | Path | Any | None = None,
+        freeze_trunk_epochs: int = 0,
+        torch_compile: bool = False,
+        amp_dtype: str = "float16",
+        optimizer: Any = None,
+        scheduler: Any = None,
+        callbacks: Any = None,
     ) -> None:
         super().__init__(
             input_dim=input_dim,
@@ -267,6 +315,13 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
             device=device,
             random_state=random_state,
             verbose=verbose,
+            init_from=init_from,
+            freeze_trunk_epochs=freeze_trunk_epochs,
+            torch_compile=torch_compile,
+            amp_dtype=amp_dtype,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            callbacks=callbacks,
         )
         self.channels = channels
         self.kernel_size = kernel_size
@@ -274,15 +329,20 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
         self.head_dim = head_dim
         self.dropout = dropout
 
+    def _arch_params(self) -> dict[str, Any]:
+        return {
+            "channels": tuple(self.channels),
+            "kernel_size": self.kernel_size,
+            "pool_size": self.pool_size,
+            "head_dim": int(self.head_dim),
+            "dropout": float(self.dropout),
+        }
+
     def _build_model(self) -> nn.Module:
         return SpectralCNN1D(
             input_dim=self.input_dim_,
             n_classes=self.n_classes_,
-            channels=tuple(self.channels),
-            kernel_size=self.kernel_size,
-            pool_size=self.pool_size,
-            head_dim=int(self.head_dim),
-            dropout=float(self.dropout),
+            **self._arch_params(),
         )
 
     @classmethod
@@ -293,24 +353,21 @@ class MaldiCNNClassifier(BaseSpectralClassifier):
 
         Scales ``kernel_size`` inversely with ``bin_width`` relative to
         the package reference (``bin_width=3``, ``kernel_size=7``).
-        Any keyword in ``**overrides`` wins over the auto-scaled value.
 
         Parameters
         ----------
         bin_width : int
-            Bin width in Daltons (e.g. 3 for the MaldiAMRKit default,
-            6 for coarser binning).
+            Bin width in Daltons (e.g. 3 for the MaldiAMRKit default).
         input_dim : int
-            Number of bins in the input. Stored on the classifier for
-            shape validation.
+            Number of bins in the input.
         **overrides
-            Any additional keyword arguments override the scaled defaults.
+            Any other constructor argument; it wins over the scaled
+            value.
 
         Returns
         -------
         MaldiCNNClassifier
-            An unfitted estimator with ``kernel_size`` scaled for the
-            given ``bin_width``.
+            An unfitted estimator.
         """
         kwargs: dict[str, Any] = {
             "input_dim": input_dim,

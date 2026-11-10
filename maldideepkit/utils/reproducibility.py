@@ -59,7 +59,11 @@ def resolve_device(device: str | torch.device | None) -> torch.device:
     Raises
     ------
     ValueError
-        If ``device`` is an unknown string.
+        If ``device`` is neither a string, a :class:`torch.device`, nor
+        ``None``.
+    RuntimeError
+        If ``device`` is a string that :class:`torch.device` does not
+        accept.
     """
     if device is None or device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,4 +71,4 @@ def resolve_device(device: str | torch.device | None) -> torch.device:
         return device
     if isinstance(device, str):
         return torch.device(device)
-    raise ValueError(f"Unsupported device specifier: {device!r}")
+    raise ValueError(f"Unsupported device specifier: {device!r}.")

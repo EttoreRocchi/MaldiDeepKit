@@ -116,6 +116,7 @@ intersphinx_mapping = {
     "sklearn": ("https://scikit-learn.org/stable/", None),
     "scipy": ("https://docs.scipy.org/doc/scipy/", None),
     "torch": ("https://pytorch.org/docs/stable/", None),
+    "maldiamrkit": ("https://maldiamrkit.readthedocs.io/en/latest/", None),
 }
 
 
@@ -146,21 +147,29 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 if _available("pydata_sphinx_theme"):
     html_theme = "pydata_sphinx_theme"
-    html_logo = "_static/maldideepkit_logo.png"
+    html_logo = "_static/maldideepkit_lockup.svg"
     html_theme_options = {
         # Logo configuration
         "logo": {
-            "text": "MaldiDeepKit",
-            "image_light": "_static/maldideepkit_logo.png",
-            "image_dark": "_static/maldideepkit_logo.png",
+            "image_light": "_static/maldideepkit_lockup.svg",
+            "image_dark": "_static/maldideepkit_lockup_dark.svg",
+            "alt_text": "MaldiDeepKit home",
         },
         # Top navigation bar layout
         "navbar_start": ["navbar-logo"],
         "navbar_center": ["navbar-nav"],
         "navbar_end": ["theme-switcher", "navbar-icon-links"],
+        "navbar_persistent": ["search-button"],
+        "navbar_align": "left",
         "header_links_before_dropdown": 4,
-        # Icon links (GitHub, PyPI)
+        # Icon links (MaldiSuite, GitHub, PyPI)
         "icon_links": [
+            {
+                "name": "MaldiSuite",
+                "url": "https://ettorerocchi.github.io/MaldiSuite/",
+                "icon": "_static/maldisuite.svg",
+                "type": "local",
+            },
             {
                 "name": "GitHub",
                 "url": "https://github.com/EttoreRocchi/MaldiDeepKit",
@@ -181,12 +190,14 @@ if _available("pydata_sphinx_theme"):
         "collapse_navigation": True,
         # Footer
         "footer_start": ["copyright"],
+        "footer_center": ["maldisuite-footer"],
         "footer_end": ["last-updated"],
         # Syntax highlighting
         "pygments_light_style": "default",
         "pygments_dark_style": "monokai",
     }
-    html_css_files = ["css/custom.css"]
+    # Shared MaldiSuite theme, then the package colour
+    html_css_files = ["css/maldisuite.css", "css/custom.css"]
     # Sidebar configuration: pydata-specific templates, no sidebar on
     # the landing page.
     html_sidebars = {
@@ -200,6 +211,9 @@ else:
     html_css_files = []
 
 html_static_path = ["_static"]
+templates_path = ["_templates"]
+html_title = f"MaldiDeepKit {release}"
+html_favicon = "_static/favicon.svg"
 
 nbsphinx_execute = "never"
 nbsphinx_allow_errors = True

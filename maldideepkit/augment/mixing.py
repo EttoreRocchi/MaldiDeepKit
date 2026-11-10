@@ -19,7 +19,20 @@ import torch.nn.functional as F
 
 
 def to_one_hot(y: torch.Tensor, n_classes: int) -> torch.Tensor:
-    """Return ``y`` as a float one-hot tensor of shape ``(batch, n_classes)``."""
+    """Return ``y`` as a float one-hot tensor of shape ``(batch, n_classes)``.
+
+    Parameters
+    ----------
+    y : torch.Tensor of shape (batch,)
+        Integer class indices.
+    n_classes : int
+        Number of classes.
+
+    Returns
+    -------
+    torch.Tensor of shape (batch, n_classes)
+        ``float32`` one-hot encoding of ``y``.
+    """
     return F.one_hot(y.long(), num_classes=n_classes).to(dtype=torch.float32)
 
 

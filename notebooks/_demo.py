@@ -314,7 +314,7 @@ def binary_labels(
     antibiotic: str | None = None,
     positive: str = "R",
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Drop unlabelled / intermediate samples and return ``(X, y)`` for
+    """Drop unlabeled / intermediate samples and return ``(X, y)`` for
     binary classification.
 
     Spectra whose ``meta[antibiotic]`` value is missing or not in
@@ -335,7 +335,7 @@ def binary_labels(
     Returns
     -------
     X : pd.DataFrame
-        Feature matrix restricted to labelled rows.
+        Feature matrix restricted to labeled rows.
     y : pd.Series of int
         Binary labels aligned to ``X.index``.
     """

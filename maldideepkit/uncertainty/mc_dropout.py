@@ -1,11 +1,12 @@
 """Monte Carlo Dropout uncertainty estimator.
 
 Runs the underlying classifier's forward pass ``n_samples`` times with
-dropout layers kept in training mode. The variance of the resulting
-softmax distribution is interpreted as epistemic uncertainty (model
-disagreement), while the mean of the per-pass entropies is interpreted
-as aleatoric uncertainty (data noise), following the decomposition in
-Kendall and Gal (2017).
+dropout layers kept in training mode. The mutual information between
+the prediction and the weights (the entropy of the mean prediction minus
+the mean of the per-pass entropies) is the epistemic uncertainty (model
+disagreement), and the mean of the per-pass entropies is the aleatoric
+uncertainty (data noise), following the decomposition of Depeweg et al.
+(2018).
 """
 
 from __future__ import annotations
@@ -44,8 +45,8 @@ class MCDropoutEstimator(BaseUncertaintyEstimator):
         A fitted classifier whose architecture contains at least one
         :class:`torch.nn.Dropout` (or its 1-D / 2-D / 3-D variants). A
         warning is emitted if it does not, but the estimator still runs
-        - in that degenerate case all ``n_samples`` passes are identical
-        and epistemic uncertainty collapses to ``0``.
+        (in that degenerate case all ``n_samples`` passes are identical
+        and the epistemic uncertainty collapses to ``0``).
     n_samples : int, default=30
         Number of stochastic forward passes per call to
         :meth:`predict_with_uncertainty`. Higher values reduce variance
@@ -80,7 +81,7 @@ class MCDropoutEstimator(BaseUncertaintyEstimator):
         self.batch_size = None if batch_size is None else int(batch_size)
         if not _has_dropout(classifier.model_):
             warnings.warn(
-                f"{type(classifier).__name__} contains no Dropout layers; "
+                f"{type(classifier).__name__} contains no dropout layers; "
                 "MCDropoutEstimator will produce identical samples and zero "
                 "epistemic uncertainty.",
                 stacklevel=2,

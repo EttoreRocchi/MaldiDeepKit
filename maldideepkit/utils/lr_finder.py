@@ -11,13 +11,13 @@ Diagnostic only; not wired into
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import torch
 from torch import nn
 
-from .loss import FocalLoss
+from .optim import build_optimizer
 from .reproducibility import resolve_device, seed_everything
 
 if TYPE_CHECKING:
@@ -42,9 +42,11 @@ def find_lr(
     ----------
     classifier : BaseSpectralClassifier
         An unfitted classifier configured with the desired architecture
-        / batch_size / loss. Its ``learning_rate`` is ignored (we drive
-        it manually across the sweep) and its weights are reset at the
-        start of every call.
+        / batch_size / loss. Its ``learning_rate`` is ignored (the sweep
+        sets it at every step) and its weights are reset at the start
+        of every call. ``init_from`` is not applied: the sweep
+        runs a randomly initialised model with preprocessing fitted on
+        ``X`` (a :class:`UserWarning` is emitted when it is set).
     X, y : array-like
         Training data. Only enough batches to cover ``num_iter`` steps
         are consumed.
@@ -71,6 +73,14 @@ def find_lr(
     """
     from ..base.data import make_loaders
 
+    if getattr(classifier, "init_from", None) is not None:
+        warnings.warn(
+            "find_lr ignores init_from: the sweep uses a randomly "
+            "initialised model with its own preprocessing fitted on X, "
+            "not the pre-trained trunk and the encoder's preprocessing.",
+            UserWarning,
+            stacklevel=2,
+        )
     seed_everything(int(classifier.random_state))
     device = resolve_device(classifier.device)
 
@@ -92,17 +102,15 @@ def find_lr(
     class_weight = classifier._compute_class_weight(y_encoded)
     if class_weight is not None:
         class_weight = class_weight.to(device)
-    if classifier.loss == "cross_entropy":
-        criterion: nn.Module = nn.CrossEntropyLoss(
-            weight=class_weight, label_smoothing=float(classifier.label_smoothing)
-        )
-    else:
-        criterion = FocalLoss(
-            weight=class_weight,
-            gamma=float(classifier.focal_gamma),
-            label_smoothing=float(classifier.label_smoothing),
-        )
-    optimizer = torch.optim.Adam(model.parameters(), lr=start_lr)
+    criterion = classifier._build_criterion(class_weight, reduction="mean")
+    if isinstance(criterion, nn.Module):
+        criterion = criterion.to(device)
+    optimizer = build_optimizer(
+        classifier.optimizer,
+        model.parameters(),
+        learning_rate=start_lr,
+        weight_decay=0.0,
+    )
 
     lrs: list[float] = []
     losses: list[float] = []
@@ -129,6 +137,9 @@ def find_lr(
         optimizer.zero_grad()
         logits = model(xb)
         loss = criterion(logits, yb)
+        if loss.ndim > 0:
+            # A custom per-row loss.
+            loss = loss.mean()
         loss.backward()
         optimizer.step()
 

@@ -1,10 +1,10 @@
-Quickstart Guide
+Quickstart guide
 ================
 
 This guide walks through the core workflows for fitting, inspecting, and
 persisting MaldiDeepKit classifiers on binned MALDI-TOF spectra.
 
-Fitting a Classifier
+Fitting a classifier
 --------------------
 
 Every MaldiDeepKit classifier exposes the standard scikit-learn estimator
@@ -26,7 +26,7 @@ API (``fit``, ``predict``, ``predict_proba``, and ``score``):
    preds = clf.predict(X)
    acc = clf.score(X, y)
 
-Switching Architectures
+Switching architectures
 -----------------------
 
 The four classifiers share the same base API, so swapping one out is a
@@ -52,13 +52,15 @@ one-line change:
        clf.fit(X, y)
        print(f"{name}: {clf.score(X, y):.3f}")
 
-Inspecting Attention Weights
+Inspecting attention weights
 ----------------------------
 
 :class:`~maldideepkit.MaldiMLPClassifier` has a sigmoid-gated attention
-layer enabled by default. After fitting, the last forward pass is cached
-on ``attention_weights_`` and :meth:`get_attention_weights` recomputes
-them for arbitrary inputs:
+layer enabled by default.
+:meth:`~maldideepkit.MaldiMLPClassifier.get_attention_weights` returns
+the gates of every row of its input, and ``attention_weights_`` keeps
+those of the last forward pass (``predict``, ``predict_proba``, or
+``get_attention_weights``; after ``fit``, at most 64 training rows):
 
 .. code-block:: python
 
@@ -88,8 +90,8 @@ Any object with a DataFrame-like ``.X`` attribute (notably
    clf = MaldiCNNClassifier(random_state=0).fit(ds, ds.y.squeeze())
    preds = clf.predict(ds)
 
-Using sklearn Pipelines
------------------------
+Using scikit-learn pipelines
+----------------------------
 
 MaldiDeepKit classifiers behave like any other scikit-learn estimator
 and compose inside pipelines and cross-validators:
@@ -110,10 +112,10 @@ and compose inside pipelines and cross-validators:
    scores = cross_val_score(pipe, X, y, cv=cv, scoring="accuracy")
    print(f"CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
 
-Class Imbalance
+Class imbalance
 ---------------
 
-Three orthogonal knobs, combinable:
+Three independent options, which can be combined:
 
 .. code-block:: python
 
@@ -136,17 +138,19 @@ Three orthogonal knobs, combinable:
    ).fit(X, y)
    print(clf.threshold_)
 
-Training Recipe and LR Schedule
+Training recipe and LR schedule
 -------------------------------
 
-Every classifier uses linear warmup + cosine-annealing LR decay. The
-deep models (:class:`~maldideepkit.MaldiResNetClassifier`,
-:class:`~maldideepkit.MaldiTransformerClassifier`) ship with the
-training recipe that keeps them stable out of the box:
-``weight_decay`` > 0 (engages ``AdamW``), ``grad_clip_norm=1.0``, a
-short ``warmup_epochs``, and for the Transformer additionally
-``drop_path_rate=0.1``, ``attention_dropout=0.0``, ``layerscale_init=1e-4``,
-and ``learning_rate=3e-4``. Override any of these at construction time:
+Every classifier anneals the learning rate with a cosine schedule
+(``scheduler="cosine"``, the default) after ``warmup_epochs`` epochs of
+linear warmup. The deep models
+(:class:`~maldideepkit.MaldiResNetClassifier`,
+:class:`~maldideepkit.MaldiTransformerClassifier`) have defaults that
+keep them stable: ``weight_decay`` > 0 (which selects ``AdamW``),
+``grad_clip_norm=1.0``, a short ``warmup_epochs``, and, for the
+Transformer, also ``drop_path_rate=0.1``, ``attention_dropout=0.0``,
+``layerscale_init=1e-4``, and ``learning_rate=3e-4``. Override any of
+these at construction time:
 
 .. code-block:: python
 
@@ -161,18 +165,20 @@ and ``learning_rate=3e-4``. Override any of these at construction time:
 The MLP and CNN baselines keep the lean defaults (Adam, no clipping,
 no warmup).
 
-Mixed Precision
+Mixed precision
 ---------------
 
-Enable ``use_amp=True`` to train with :func:`torch.autocast` +
-:class:`torch.amp.GradScaler` on CUDA. ~2× speedup on recent NVIDIA
-GPUs; a no-op on CPU.
+Set ``use_amp=True`` to train on a GPU under :class:`torch.autocast`,
+in the dtype chosen by ``amp_dtype``: ``"float16"`` (the default, with
+a :class:`torch.amp.GradScaler`), ``"bfloat16"``, or ``"auto"``
+(``bfloat16`` when the GPU supports it). It gives about a 2× speedup on
+recent NVIDIA GPUs, and does nothing on CPU.
 
 .. code-block:: python
 
    clf = MaldiTransformerClassifier(use_amp=True, random_state=0).fit(X, y)
 
-Stochastic Weight Averaging
+Stochastic weight averaging
 ---------------------------
 
 Set ``swa_start_epoch`` to maintain a
@@ -183,27 +189,29 @@ and use the SWA-averaged weights at prediction time.
 
    clf = MaldiCNNClassifier(epochs=80, swa_start_epoch=60, random_state=0).fit(X, y)
 
-Probability Calibration
+Probability calibration
 -----------------------
 
 ``calibrate_temperature=True`` fits a scalar temperature on the
-validation-split logits by LBFGS (Guo et al. 2017). Applied in
-:meth:`predict_proba` without changing argmax order.
+validation-split logits by LBFGS (Guo et al., 2017). It is applied in
+:meth:`~maldideepkit.BaseSpectralClassifier.predict_proba` without
+changing the argmax.
 
 .. code-block:: python
 
    clf = MaldiCNNClassifier(calibrate_temperature=True, random_state=0).fit(X, y)
    print(clf.temperature_)
 
-Spectral Warping (pre-scaling)
+Spectral warping (pre-scaling)
 ------------------------------
 
 Pass any sklearn-style transformer with ``fit(X) / transform(X)``
-(typically :class:`maldiamrkit.alignment.Warping`) via ``warping=``.
+(typically :class:`maldiamrkit.alignment.Warping`) as ``warping=``.
 It is fitted on the **training split only** (so no leakage from the
-validation fold) and applied to both splits, *before* per-feature
-standardization. At :meth:`predict` time, incoming spectra are
-transformed by the fitted warper first.
+validation split) and applied to both splits, *before* per-feature
+standardisation. At
+:meth:`~maldideepkit.BaseSpectralClassifier.predict` time, incoming
+spectra are transformed by the fitted warper first.
 
 .. code-block:: python
 
@@ -217,14 +225,15 @@ transformed by the fitted warper first.
    ).fit(X, y)
 
 The fitted transformer is stored as ``clf.warper_`` and persisted as a
-sibling joblib pickle (``<path>.warper.pkl``) by :meth:`save`.
+joblib pickle (``<path>.warper.pkl``) by
+:meth:`~maldideepkit.BaseSpectralClassifier.save`.
 
-Finding a Learning Rate
+Finding a learning rate
 -----------------------
 
-:func:`~maldideepkit.utils.find_lr` sweeps the LR geometrically over a
-short training run and returns the curve plus a steepest-descent
-suggestion:
+:func:`~maldideepkit.utils.find_lr` sweeps the learning rate
+geometrically over a short training run and returns the curve plus a
+steepest-descent suggestion:
 
 .. code-block:: python
 
@@ -232,55 +241,70 @@ suggestion:
    out = find_lr(MaldiCNNClassifier(random_state=0), X, y, num_iter=200)
    print(out["suggested_lr"])
 
-Sharpness-Aware Minimization (SAM)
+Sharpness-aware minimisation (SAM)
 ----------------------------------
 
-``use_sam=True`` wraps the base optimizer in
+``use_sam=True`` wraps the base optimiser in
 :class:`~maldideepkit.utils.SAMOptimizer`. Two forward/backward passes
-per step (~2× compute); typically helps generalization on small
+per step (~2× compute); it typically helps generalisation on small
 datasets.
 
 .. code-block:: python
 
    clf = MaldiCNNClassifier(use_sam=True, sam_rho=0.05, random_state=0).fit(X, y)
 
-Device Placement and Reproducibility
+Device placement and reproducibility
 ------------------------------------
 
-``device="auto"`` (the default) picks CUDA when available and CPU
-otherwise. Set ``random_state`` to seed Python, NumPy, and PyTorch in
-one call; the same seed produces identical weights and predictions:
+``device="auto"`` (the default) picks a GPU (``"cuda"``) when one is
+available and the CPU otherwise. Set ``random_state`` to seed Python,
+NumPy, and PyTorch in one call. On CPU, with the same number of
+threads, the same seed produces identical weights and predictions; on a
+GPU identical results are not guaranteed:
 
 .. code-block:: python
 
+   # Needs a GPU
    clf = MaldiTransformerClassifier(device="cuda", random_state=42).fit(X, y)
 
 Persistence
 -----------
 
-:meth:`save` writes a state-dict ``.pt`` plus a hyperparameter ``.json``
-pair; :meth:`load` restores both. Attempting :meth:`predict` with a
-different number of bins from the training matrix raises a clear
+:meth:`~maldideepkit.BaseSpectralClassifier.save` writes a state-dict
+``.pt`` plus a hyperparameter ``.json`` pair (and a ``.warper.pkl``
+when a warper was fitted); :meth:`~maldideepkit.BaseSpectralClassifier.load`
+restores them. :meth:`~maldideepkit.BaseSpectralClassifier.predict`
+on a number of bins different from the training matrix raises a clear
 ``ValueError``:
 
 .. code-block:: python
 
+   from maldideepkit import BaseSpectralClassifier, MaldiMLPClassifier
+
+   clf = MaldiMLPClassifier(random_state=0).fit(X, y)
    clf.save("my_model")
    # -> my_model.pt, my_model.json
 
-   from maldideepkit import MaldiMLPClassifier, BaseSpectralClassifier
-
-   restored = MaldiMLPClassifier.load("my_model")
-   # or infer the class from the JSON:
+   # Infer the class from the JSON
    restored = BaseSpectralClassifier.load("my_model")
+   # or name the saved class: load() on another class raises ValueError
+   restored = MaldiMLPClassifier.load("my_model")
 
-Early Stopping and Validation
+A :class:`~maldideepkit.augment.SpectrumAugment` ``augment`` is saved
+as its class import path plus its constructor parameters, and ``save``
+writes nothing when a parameter cannot be saved (a lambda, or a
+function or class defined inside a function). For what ``load``
+accepts by default and when it needs ``trusted=True``, see
+:ref:`the loading rule <checkpoint-trust>` of the pre-training page.
+
+Early stopping and validation
 -----------------------------
 
 A stratified internal validation split (controlled by ``val_fraction``)
-is carved out of every :meth:`fit` call and used for early stopping
-(``early_stopping_patience`` epochs without improvement) and learning-
-rate scheduling. Set ``verbose=True`` to watch the validation loss:
+is carved out of every :meth:`~maldideepkit.BaseSpectralClassifier.fit`
+call and used for early stopping (``early_stopping_patience`` epochs
+without improvement). Set ``verbose=True`` to watch the validation
+loss:
 
 .. code-block:: python
 

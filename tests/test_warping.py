@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator, TransformerMixin
 
 from maldideepkit import MaldiMLPClassifier
-from maldideepkit.base.data import make_loaders
+from maldideepkit.base import data as data_module
+from maldideepkit.base.data import _warp_numpy, make_loaders
 
 
 class ShiftWarper(BaseEstimator, TransformerMixin):
@@ -164,3 +167,102 @@ class TestRealMaldiAMRKitWarping:
         assert clf.warper_ is not None
         assert hasattr(clf.warper_, "ref_spec_")
         assert clf.predict(X[:4]).shape == (4,)
+
+
+def _single_call(warper, X):
+    """Reference output: one ``transform`` call on the whole matrix."""
+    return np.asarray(warper.transform(pd.DataFrame(X)).to_numpy(), dtype=np.float32)
+
+
+def _peaked_spectra(n, n_bins=128, seed=0):
+    """Non-negative spectra with seven randomly shifted Gaussian peaks."""
+    rng = np.random.default_rng(seed)
+    grid = np.arange(n_bins)
+    X = 0.1 * np.abs(rng.standard_normal((n, n_bins)))
+    for i in range(n):
+        shift = rng.integers(-4, 5)
+        for center in (10, 25, 40, 60, 80, 100, 115):
+            X[i] += 10.0 * np.exp(-0.5 * ((grid - center - shift) / 1.5) ** 2)
+    return X.astype(np.float32)
+
+
+class NonMonotonicWarper(ShiftWarper):
+    """Warns as ``maldiamrkit.alignment.Warping`` for rows with a positive first bin."""
+
+    def transform(self, X):
+        warnings.warn("an unrelated warning", RuntimeWarning, stacklevel=2)
+        n_bad = int((X.to_numpy()[:, 0] > 0).sum())
+        if n_bad:
+            warnings.warn(
+                f"Warping produced non-monotonic m/z mappings for {n_bad}/{len(X)} "
+                "sample(s). This may indicate poor alignment quality.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return super().transform(X)
+
+
+class TestChunkedWarping:
+    """``_warp_numpy`` applies the warper in row chunks with identical output."""
+
+    def test_non_monotonic_warnings_are_merged(self, monkeypatch):
+        monkeypatch.setattr(data_module, "_WARP_CHUNK_ROWS", 3)
+        X = np.zeros((10, 4), dtype=np.float32)
+        X[[0, 4, 5, 9], 0] = 1.0
+        warper = NonMonotonicWarper().fit(np.zeros((2, 4)))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = _warp_numpy(warper, X)
+        np.testing.assert_array_equal(out, X)
+        assert [(w.category, str(w.message)) for w in caught] == [
+            (RuntimeWarning, "an unrelated warning")
+        ] * 4 + [
+            (
+                UserWarning,
+                "Warping produced non-monotonic m/z mappings for 4/10 sample(s). "
+                "This may indicate poor alignment quality.",
+            )
+        ]
+
+    @pytest.mark.parametrize("n", [1, 3, 4, 9, 10])
+    def test_shift_warper_chunks_match_single_call(self, monkeypatch, n):
+        monkeypatch.setattr(data_module, "_WARP_CHUNK_ROWS", 3)
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((n, 16)).astype(np.float32)
+        warper = ShiftWarper().fit(rng.standard_normal((20, 16)))
+        expected = _single_call(warper, X)
+        calls = []
+        orig = warper.transform
+
+        def spy(df):
+            calls.append((len(df), int(df.index[0])))
+            return orig(df)
+
+        warper.transform = spy
+        out = _warp_numpy(warper, X)
+        assert calls == [(min(3, n - s), s) for s in range(0, n, 3)]
+        assert out.dtype == np.float32
+        assert np.array_equal(out, expected)
+
+    @pytest.mark.parametrize("method", ["shift", "linear", "piecewise"])
+    def test_maldiamrkit_warping_chunks_match_single_call(self, monkeypatch, method):
+        pytest.importorskip("maldiamrkit.alignment")
+        from maldiamrkit.alignment import Warping
+
+        warper = Warping(method=method).fit(pd.DataFrame(_peaked_spectra(12)))
+        X = _peaked_spectra(11, seed=1)
+        expected = _single_call(warper, X)
+        monkeypatch.setattr(data_module, "_WARP_CHUNK_ROWS", 4)
+        out = _warp_numpy(warper, X)
+        assert out.dtype == np.float32
+        assert np.array_equal(out, expected)
+
+    def test_empty_input(self, monkeypatch):
+        monkeypatch.setattr(data_module, "_WARP_CHUNK_ROWS", 3)
+        rng = np.random.default_rng(0)
+        warper = ShiftWarper().fit(rng.standard_normal((5, 16)))
+        X = np.empty((0, 16), dtype=np.float32)
+        out = _warp_numpy(warper, X)
+        assert out.shape == (0, 16)
+        assert out.dtype == np.float32
+        assert np.array_equal(out, _single_call(warper, X))

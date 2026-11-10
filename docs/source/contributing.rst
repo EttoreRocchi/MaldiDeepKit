@@ -1,9 +1,9 @@
 Contributing
 ============
 
-Thanks for your interest in contributing! Here's how to get started.
+Thanks for your interest in contributing! Here is how to get started.
 
-Development Setup
+Development setup
 -----------------
 
 .. code-block:: bash
@@ -13,15 +13,15 @@ Development Setup
    pip install -e ".[dev]"
    pre-commit install
 
-Running Tests
+Running tests
 -------------
 
 .. code-block:: bash
 
-   make test            # fast subset (excludes slow markers)
-   make test-cov        # full run with term + HTML coverage report
+   make test            # full test suite
+   make test-cov        # full test suite with a terminal coverage report
 
-The coverage gate is 95%. Please add tests for any new public API.
+Please add tests for any new public API.
 
 Linting
 -------
@@ -49,7 +49,7 @@ Style
 - Seed Python, NumPy, and PyTorch via ``random_state`` so identical
   configs produce identical weights.
 
-Adding a New Classifier
+Adding a new classifier
 -----------------------
 
 Every classifier lives in its own subpackage
@@ -65,17 +65,17 @@ package ``__init__.py``, wire it into ``conftest.py``'s
 ``ALL_FACTORIES`` dict, and add per-model tests in
 ``tests/test_<family>.py``.
 
-Submitting Changes
+Submitting changes
 ------------------
 
 1. Fork the repository and create a feature branch from ``main``.
-2. Add tests for any new functionality; aim to keep coverage ≥ 95%.
+2. Add tests for any new functionality.
 3. Run ``make test`` and ``make lint`` (both must be clean).
 4. Update ``CHANGELOG.md`` under the next version heading.
 5. Open a pull request with a clear title and a body that motivates
    the design decision (not just what changed).
 
-Reporting Issues
+Reporting issues
 ----------------
 
 Open an issue on `GitHub <https://github.com/EttoreRocchi/MaldiDeepKit/issues>`_
@@ -83,5 +83,5 @@ with a minimal reproducer:
 
 - MaldiDeepKit version (``python -c "import maldideepkit; print(maldideepkit.__version__)"``)
 - PyTorch, scikit-learn, and ``maldiamrkit`` versions
-- Feature matrix shape, classifier and kwargs, and the exception or
-  wrong result
+- Feature matrix shape, classifier and its parameters, and the
+  exception or wrong result

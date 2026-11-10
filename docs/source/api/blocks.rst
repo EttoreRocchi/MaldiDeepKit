@@ -1,56 +1,66 @@
-Blocks Module
+Blocks module
 =============
 
-.. currentmodule:: maldideepkit.blocks
+.. module:: maldideepkit.blocks
 
-One-stop import path for every ``nn.Module`` primitive backing the
-classifier catalog. Symbols are re-exported from their per-family
-defining modules (so the exact same class object is accessible through
-either path).
+``maldideepkit.blocks`` re-exports every ``nn.Module`` behind the
+classifiers from one import path; each name is the same class object
+as in its family module.
 
 Full backbones
 --------------
 
-The ``nn.Module`` subclasses the sklearn-compatible classifier wrappers
-drive. Use these if you want to own the training loop but keep
-MaldiDeepKit's architecture defaults.
+The ``nn.Module`` subclasses that the classifiers train. Use them to
+write your own training loop with the MaldiDeepKit architecture
+defaults.
 
-- :class:`SpectralAttentionMLP`
-- :class:`SpectralCNN1D`
-- :class:`SpectralResNet1D`
-- :class:`SpectralTransformer1D`
+- :class:`~maldideepkit.attention.mlp.SpectralAttentionMLP`
+- :class:`~maldideepkit.cnn.cnn.SpectralCNN1D`
+- :class:`~maldideepkit.resnet.resnet.SpectralResNet1D`
+- :class:`~maldideepkit.transformer.transformer.SpectralTransformer1D`
 
 Composable primitives
 ---------------------
 
-Smaller ``nn.Module``'s that the backbones are composed of. Useful for
-mixing components across families or building custom architectures.
+The smaller modules that make up the backbones, for mixing components
+across families or building custom architectures.
 
-- :class:`BasicBlock1D`
-- :class:`TransformerBlock`
-- :class:`MultiHeadSelfAttention`
-- :class:`PatchEmbed1D`
-- :class:`DropPath`
+- :class:`~maldideepkit.resnet.resnet.BasicBlock1D`
+- :class:`~maldideepkit.transformer.transformer.TransformerBlock`
+- :class:`~maldideepkit.transformer.transformer.MultiHeadSelfAttention`
+- :class:`~maldideepkit.blocks.PatchEmbed1D`
+- :class:`~maldideepkit.blocks.DropPath`
 
-Each link above resolves to the autodoc entry on the corresponding
-per-family page (``mlp``, ``cnn``, ``resnet``, ``transformer``), so
-there is a single source of truth for every class's documentation.
+The other classes are documented on their family pages (:doc:`mlp`,
+:doc:`cnn`, :doc:`resnet`, and :doc:`transformer`);
+:class:`~maldideepkit.blocks.PatchEmbed1D` and
+:class:`~maldideepkit.blocks.DropPath` are documented here:
 
-Example
--------
+.. autoclass:: maldideepkit.blocks.PatchEmbed1D
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: maldideepkit.blocks.DropPath
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Examples
+--------
 
 .. code-block:: python
 
-    import torch
-    from maldideepkit.blocks import (
-        SpectralTransformer1D, TransformerBlock, PatchEmbed1D,
-    )
+   import torch
+   from maldideepkit.blocks import (
+       SpectralTransformer1D, TransformerBlock, PatchEmbed1D,
+   )
 
-    # Full backbone:
-    backbone = SpectralTransformer1D(input_dim=6000, depth=6)
+   # Full backbone:
+   backbone = SpectralTransformer1D(input_dim=6000, depth=6)
 
-    # Or compose a single transformer block into your own stack:
-    block = TransformerBlock(dim=128, num_heads=4)
-    tokens = torch.randn(2, 1500, 128)
-    out = block(tokens)
-    assert out.shape == (2, 1500, 128)
+   # Or compose a single transformer block into your own stack:
+   block = TransformerBlock(dim=128, num_heads=4)
+   tokens = torch.randn(2, 1500, 128)
+   out = block(tokens)
+   assert out.shape == (2, 1500, 128)

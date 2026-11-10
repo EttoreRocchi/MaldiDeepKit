@@ -73,10 +73,10 @@ class LaplaceEstimator(BaseUncertaintyEstimator):
             )
         try:
             import laplace  # noqa: F401
-        except ImportError as exc:  # pragma: no cover - guard tested via importorskip
+        except ImportError as exc:  # pragma: no cover (tested via importorskip)
             raise ImportError(
-                "laplace-torch is required for LaplaceEstimator. "
-                "Install it with: pip install laplace-torch"
+                "laplace-torch is required for LaplaceEstimator "
+                "(pip install laplace-torch)."
             ) from exc
         self.subset_of_weights = subset_of_weights
         self.hessian_structure = hessian_structure
@@ -95,7 +95,7 @@ class LaplaceEstimator(BaseUncertaintyEstimator):
         Applies the classifier's preprocessing to ``X_cal``, builds an
         internal :class:`~torch.utils.data.DataLoader`, fits the
         Laplace approximation, and runs marginal-likelihood prior
-        precision optimisation.
+        precision optimization.
 
         Parameters
         ----------

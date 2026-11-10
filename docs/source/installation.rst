@@ -5,23 +5,24 @@ Installation
 
    pip install maldideepkit
 
-``maldiamrkit`` is a core dependency and is installed automatically -
-MaldiDeepKit duck-types on the :class:`maldiamrkit.MaldiSet` data model
-and reuses :class:`maldiamrkit.alignment.Warping` for leak-safe
-spectral warping.
+``maldiamrkit`` is a core dependency and is installed automatically
+(MaldiDeepKit duck-types on the :class:`maldiamrkit.MaldiSet` data
+model and reuses :class:`maldiamrkit.alignment.Warping` for leak-safe
+spectral warping).
 
-MaldiDeepKit requires Python 3.10 - 3.13 and pulls in PyTorch (≥ 2.0),
-scikit-learn, einops, numpy, pandas, scipy, and matplotlib as its core
+MaldiDeepKit requires Python 3.10 or newer, is tested on 3.10 to 3.13,
+and pulls in PyTorch (≥ 2.3),
+scikit-learn, einops, NumPy, pandas, SciPy, and Matplotlib as its core
 runtime dependencies.
 
 Optional extras
 ---------------
 
-The uncertainty-quantification estimators in
-:mod:`maldideepkit.uncertainty` work out of the box for Monte Carlo
-Dropout and split conformal prediction. The Laplace approximation
-estimator additionally requires the optional ``laplace-torch``
-dependency, available via the ``uncertainty`` extra:
+Of the uncertainty-quantification estimators in
+:doc:`maldideepkit.uncertainty <api/uncertainty>`, Monte Carlo Dropout
+and split conformal prediction need no extra. The Laplace approximation
+estimator also requires the optional ``laplace-torch`` dependency,
+available through the ``uncertainty`` extra:
 
 .. code-block:: bash
 
@@ -29,22 +30,21 @@ dependency, available via the ``uncertainty`` extra:
 
 The :func:`~maldideepkit.smiles_to_fingerprint` helper used by
 :class:`~maldideepkit.MaldiDualBranchClassifier` workflows requires
-RDKit, available via the ``rdkit`` extra:
+RDKit, available through the ``rdkit`` extra:
 
 .. code-block:: bash
 
    pip install "maldideepkit[rdkit]"
 
-GPU vs. CPU
------------
+GPU vs CPU
+----------
 
-Every classifier runs on CPU, which is what the project's continuous
-integration tests against. All four architectures benefit
-significantly from CUDA when training on ~6000-bin spectra; point a
-classifier at a GPU by passing ``device="cuda"`` at construction, or
-leave the default ``device="auto"`` to pick the best available.
+With the default ``device="auto"``, every classifier trains on a CUDA
+GPU when one is available and on CPU otherwise. Pass ``device="cuda"``
+or ``device="cpu"`` at construction to force one of the two. The
+project's continuous integration runs the test suite on CPU.
 
-Development Installation
+Development installation
 ------------------------
 
 .. code-block:: bash
@@ -57,7 +57,7 @@ Development Installation
 See :doc:`contributing` for coding conventions, testing, and PR
 guidelines.
 
-Documentation Build
+Documentation build
 -------------------
 
 To build the documentation locally:
@@ -66,6 +66,6 @@ To build the documentation locally:
 
    pip install -e ".[docs]"
    make docs           # builds HTML into docs/build/html
-   make docs-serve     # same, then serves on http://localhost:8080
+   make docs-serve     # serves the built HTML on http://localhost:8080
 
 The rendered site lands in ``docs/build/html/index.html``.

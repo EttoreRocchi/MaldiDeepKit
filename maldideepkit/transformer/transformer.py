@@ -23,10 +23,10 @@ from ..base.classifier import BaseSpectralClassifier
 class MultiHeadSelfAttention(nn.Module):
     """Multi-head self-attention with QK-norm + memory-efficient SDPA.
 
-    QK-normalization applies a per-head :class:`~torch.nn.LayerNorm`
-    to query and key tensors before the scaled-dot-product, bounding
-    the softmax denominator regardless of input scale. Always on
-    (universal stability improvement with negligible compute overhead).
+    QK-normalisation applies a per-head :class:`~torch.nn.LayerNorm`
+    to query and key tensors before the scaled dot product, bounding
+    the softmax denominator regardless of input scale. It is always on
+    (it stabilises training at a negligible compute cost).
 
     Parameters
     ----------
@@ -206,6 +206,11 @@ class SpectralTransformer1D(nn.Module):
         prepends a learned token and uses its output.
     head_dim : int, default=128
         Width of the hidden dense layer in the classification head.
+
+    Attributes
+    ----------
+    feature_dim : int
+        Width of :meth:`forward_features` (``head_dim``).
     """
 
     def __init__(
@@ -278,9 +283,15 @@ class SpectralTransformer1D(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(head_dim, n_classes),
         )
+        self.feature_dim = head_dim
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Map ``(batch, input_dim)`` to ``(batch, n_classes)`` logits.
+    @property
+    def final_layer(self) -> nn.Module:
+        """Output layer mapping :meth:`forward_features` to the logits."""
+        return self.head[-1]
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(batch, input_dim)`` to ``(batch, feature_dim)`` features.
 
         Notes
         -----
@@ -304,7 +315,19 @@ class SpectralTransformer1D(nn.Module):
         else:
             start = 1 if self.cls_token is not None else 0
             pooled = tokens[:, start:].mean(dim=1)
-        return self.head(pooled)
+        for layer in list(self.head)[:-1]:
+            pooled = layer(pooled)
+        return pooled
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(batch, input_dim)`` to ``(batch, n_classes)`` logits.
+
+        Notes
+        -----
+        Inputs whose length is not a multiple of ``patch_size`` are
+        right-padded with zeros before the patch embedding.
+        """
+        return self.head[-1](self.forward_features(x))
 
 
 class MaldiTransformerClassifier(BaseSpectralClassifier):
@@ -336,17 +359,41 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
         Token aggregation for classification.
     head_dim : int, default=128
         Width of the hidden dense layer in the classification head.
+    init_from : str, path-like, MaldiSpectrumEncoder or None, default=None
+        Self-supervised encoder (checkpoint path or fitted instance)
+        whose trunk initialises the model, with its fitted
+        preprocessing inherited; see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    freeze_trunk_epochs : int, default=0
+        Number of initial epochs training only the final layer
+        (LP-FT); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    torch_compile : bool, default=False
+        Train through ``torch.compile`` (the fitted module, checkpoints,
+        and inference stay uncompiled); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    amp_dtype : {"float16", "bfloat16", "auto"}, default="float16"
+        Autocast dtype of ``use_amp=True`` (``"bfloat16"`` cannot
+        overflow and needs no ``GradScaler``); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    optimizer : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    scheduler : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    callbacks : Callback, sequence of Callback or None, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
 
     Notes
     -----
     Every parameter accepted by
-    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    :class:`~maldideepkit.BaseSpectralClassifier`
     (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
     ``calibrate_temperature``, ``device``, ``random_state``, ...) is
     forwarded to the base class. See its docstring for the full list.
 
-    Transformer training recipe baked in as defaults: ``lr=3e-4``,
-    ``weight_decay=0.05``, ``grad_clip_norm=1.0``, ``warmup_epochs=5``.
+    The defaults follow a common transformer training recipe:
+    ``learning_rate=3e-4``, ``weight_decay=0.05``,
+    ``grad_clip_norm=1.0``, and ``warmup_epochs=5``.
 
     Examples
     --------
@@ -367,6 +414,7 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
         self,
         input_dim: int | None = None,
         n_classes: int = 2,
+        *,
         patch_size: int = 4,
         embed_dim: int = 64,
         depth: int = 6,
@@ -382,7 +430,7 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
         weight_decay: float = 0.05,
         grad_clip_norm: float | None = 1.0,
         label_smoothing: float = 0.0,
-        loss: str = "cross_entropy",
+        loss: Any = "cross_entropy",
         focal_gamma: float = 2.0,
         use_amp: bool = False,
         swa_start_epoch: int | None = None,
@@ -412,6 +460,13 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
         device: str | torch.device = "auto",
         random_state: int = 0,
         verbose: bool = False,
+        init_from: str | Path | Any | None = None,
+        freeze_trunk_epochs: int = 0,
+        torch_compile: bool = False,
+        amp_dtype: str = "float16",
+        optimizer: Any = None,
+        scheduler: Any = None,
+        callbacks: Any = None,
     ) -> None:
         super().__init__(
             input_dim=input_dim,
@@ -450,6 +505,13 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
             device=device,
             random_state=random_state,
             verbose=verbose,
+            init_from=init_from,
+            freeze_trunk_epochs=freeze_trunk_epochs,
+            torch_compile=torch_compile,
+            amp_dtype=amp_dtype,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            callbacks=callbacks,
         )
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -463,21 +525,26 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
         self.pool = pool
         self.head_dim = head_dim
 
+    def _arch_params(self) -> dict[str, Any]:
+        return {
+            "patch_size": int(self.patch_size),
+            "embed_dim": int(self.embed_dim),
+            "depth": int(self.depth),
+            "num_heads": int(self.num_heads),
+            "mlp_ratio": int(self.mlp_ratio),
+            "dropout": float(self.dropout),
+            "attention_dropout": float(self.attention_dropout),
+            "drop_path_rate": float(self.drop_path_rate),
+            "layerscale_init": self.layerscale_init,
+            "pool": str(self.pool),
+            "head_dim": int(self.head_dim),
+        }
+
     def _build_model(self) -> nn.Module:
         return SpectralTransformer1D(
             input_dim=self.input_dim_,
             n_classes=self.n_classes_,
-            patch_size=int(self.patch_size),
-            embed_dim=int(self.embed_dim),
-            depth=int(self.depth),
-            num_heads=int(self.num_heads),
-            mlp_ratio=int(self.mlp_ratio),
-            dropout=float(self.dropout),
-            attention_dropout=float(self.attention_dropout),
-            drop_path_rate=float(self.drop_path_rate),
-            layerscale_init=self.layerscale_init,
-            pool=str(self.pool),
-            head_dim=int(self.head_dim),
+            **self._arch_params(),
         )
 
     @classmethod
@@ -486,9 +553,24 @@ class MaldiTransformerClassifier(BaseSpectralClassifier):
     ) -> "MaldiTransformerClassifier":
         """Construct a classifier for a given ``(bin_width, input_dim)`` layout.
 
-        The transformer is architecturally scale-agnostic, so this
-        factory only forwards ``input_dim`` and any ``**overrides``.
-        Provided for API symmetry with the other classifiers.
+        The transformer architecture does not depend on the bin width:
+        ``bin_width`` is ignored, and only ``input_dim`` and
+        ``**overrides`` are forwarded, as in
+        :meth:`~maldideepkit.BaseSpectralClassifier.from_spectrum`.
+
+        Parameters
+        ----------
+        bin_width : int
+            Bin width in Daltons (e.g. 3 for the MaldiAMRKit default).
+        input_dim : int
+            Number of bins in the input.
+        **overrides
+            Any other constructor argument.
+
+        Returns
+        -------
+        MaldiTransformerClassifier
+            An unfitted estimator.
         """
         del bin_width
         kwargs: dict[str, Any] = {"input_dim": input_dim}

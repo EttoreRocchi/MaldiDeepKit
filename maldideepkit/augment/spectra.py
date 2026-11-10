@@ -44,7 +44,7 @@ class SpectrumAugment:
     mz_warp_max_bins : int, default=0
         Peak amplitude (in bins) of a smooth cubic-spline warp of the
         m/z axis. ``0`` disables the warp. Runs on CPU. A warning is
-        emitted when the amplitude exceeds 5 % of ``n_bins``, since
+        emitted when the amplitude exceeds 5% of ``n_bins``, since
         beyond that the boundary clipping starts to dominate the
         augmentation distribution. Must be non-negative.
     mz_warp_n_knots : int, default=10
@@ -53,9 +53,9 @@ class SpectrumAugment:
     blur_sigma : float, default=0.0
         Standard deviation (in bins) of a 1-D Gaussian blur along the
         m/z axis. Zero disables the blur.
-    random_state : int, optional
+    random_state : int or None, default=None
         If provided, the transform is seeded for deterministic batches.
-        When ``None`` (default), PyTorch's global RNG is used.
+        When ``None``, PyTorch's global RNG is used.
     """
 
     def __init__(
@@ -137,10 +137,11 @@ class SpectrumAugment:
             generator=gen,
             device=X.device,
         )
-        out = torch.empty_like(X)
-        for i in range(X.shape[0]):
-            out[i] = torch.roll(X[i], shifts=int(shifts[i].item()), dims=0)
-        return out
+        # Row i rolled by shifts[i] (torch.roll semantics), as one gather:
+        # no per-row loop, so no host sync per row on a GPU.
+        n_bins = X.shape[1]
+        cols = torch.arange(n_bins, device=X.device).unsqueeze(0)
+        return X.gather(1, (cols - shifts.unsqueeze(1)) % n_bins)
 
     def _apply_spline_warp(self, X: torch.Tensor) -> torch.Tensor:
         rng = self._numpy_generator()

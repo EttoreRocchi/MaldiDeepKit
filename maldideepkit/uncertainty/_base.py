@@ -17,7 +17,7 @@ def _apply_classifier_preprocessing(
 ) -> np.ndarray:
     """Apply the classifier's full inference-time preprocessing to ``X``.
 
-    Delegates to :meth:`BaseSpectralClassifier._preprocess_input`, the
+    Delegates to :meth:`~maldideepkit.BaseSpectralClassifier._preprocess_input`, the
     single source of truth for inference preprocessing (optional
     spectral warping, the fitted ``input_transform`` state, and the
     legacy ``standardize`` path), so uncertainty estimators feed data
@@ -47,7 +47,7 @@ class BaseUncertaintyEstimator(metaclass=ABCMeta):
     ----------
     classifier : BaseSpectralClassifier
         A *fitted* MaldiDeepKit classifier. Its preprocessing pipeline
-        (warping, input transform, legacy standardisation) is reused so
+        (warping, input transform, legacy standardization) is reused so
         the uncertainty estimate is produced on inputs identical to
         those seen at training time.
 

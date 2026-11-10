@@ -1,18 +1,24 @@
-Semi-Supervised Module
+Semi-supervised module
 ======================
 
-Iterative pseudo-labeling meta-classifier that wraps any sklearn
+Iterative pseudo-labelling meta-classifier that wraps any scikit-learn
 classifier (defaults to :class:`~maldideepkit.MaldiMLPClassifier`).
 Rows of ``y`` equal to ``unlabeled_marker`` (default ``-1``) are
-treated as unlabeled; the loop takes pseudo-labels from the base
+treated as unlabelled; the loop takes pseudo-labels from the base
 estimator's ``predict`` (so a tuned decision threshold is respected),
 accepts those whose predicted-class probability is at least
 ``confidence_threshold``, and refits the base estimator on the
 expanded training set on each iteration.
 
 Follows the :class:`sklearn.semi_supervised.SelfTrainingClassifier`
-API and plugs into ``Pipeline``, ``GridSearchCV``, and
-``cross_val_score`` like any other sklearn classifier.
+API and works in ``Pipeline``, ``GridSearchCV``, and
+``cross_val_score`` like any other scikit-learn classifier. ``fit``
+takes ``sample_weight`` (a pseudo-labelled row keeps the weight of its
+row), ``get_embeddings`` returns those of the final base estimator,
+and ``save`` / ``load`` store that estimator in the classifier format
+plus the loop parameters and history in ``<path>.self_training.json``.
+The training components (``optimizer``, ``scheduler``, ``loss``, and
+``callbacks``) and ``from_spectrum`` belong to the base estimator.
 
 MaldiSelfTrainingClassifier
 ---------------------------
@@ -22,8 +28,8 @@ MaldiSelfTrainingClassifier
    :undoc-members:
    :show-inheritance:
 
-Example
--------
+Examples
+--------
 
 .. code-block:: python
 

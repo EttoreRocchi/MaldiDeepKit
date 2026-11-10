@@ -1,9 +1,11 @@
 Tutorials
 =========
 
-Interactive notebooks demonstrating MaldiDeepKit workflows end to end.
-Each notebook is self-contained and can be downloaded from the
+Interactive notebooks that demonstrate MaldiDeepKit.
+Each notebook can be downloaded from the
 `GitHub repository <https://github.com/EttoreRocchi/MaldiDeepKit/tree/main/notebooks>`_.
+They all use the helper ``notebooks/_demo.py``, which downloads a 370 MB
+dataset from Zenodo on the first run.
 
 .. toctree::
    :maxdepth: 2
@@ -13,11 +15,12 @@ Each notebook is self-contained and can be downloaded from the
    notebooks/03_attention_interpretation
    notebooks/04_full_pipeline
    notebooks/05_uncertainty
+   notebooks/06_pretraining
 
-Example Workflows
+Example workflows
 -----------------
 
-Single-Architecture Baseline
+Single-architecture baseline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
@@ -41,7 +44,7 @@ Single-Architecture Baseline
    scores = cross_val_score(pipe, X, y, cv=cv, scoring="accuracy")
    print(f"CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
 
-Cross-Architecture Comparison
+Cross-architecture comparison
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
@@ -64,8 +67,8 @@ Cross-Architecture Comparison
        clf.fit(X, y)
        print(f"{name}: {clf.score(X, y):.3f}")
 
-Full MaldiSuite Pipeline
-~~~~~~~~~~~~~~~~~~~~~~~~
+With MaldiAMRKit and MaldiBatchKit
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 

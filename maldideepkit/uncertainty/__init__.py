@@ -3,13 +3,13 @@
 Three drop-in estimators that share a single
 :meth:`predict_with_uncertainty` interface:
 
-- :class:`MCDropoutEstimator` - Monte Carlo Dropout. Stochastic
+- :class:`MCDropoutEstimator`: Monte Carlo Dropout. Stochastic
   forward passes with dropout active; decomposes total uncertainty
   into epistemic (model disagreement) and aleatoric (data noise)
   components.
-- :class:`LaplaceEstimator` - Last-layer or full-network Laplace
+- :class:`LaplaceEstimator`: last-layer or full-network Laplace
   approximation via the optional ``laplace-torch`` dependency.
-- :class:`ConformalPredictor` - Distribution-free split conformal
+- :class:`ConformalPredictor`: distribution-free split conformal
   prediction with the LAC non-conformity score; produces calibrated
   prediction sets without retraining the model.
 

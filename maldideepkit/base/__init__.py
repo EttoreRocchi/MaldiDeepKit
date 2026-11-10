@@ -2,13 +2,13 @@
 
 Exposes:
 
-- :class:`BaseSpectralClassifier` - abstract base for the four
-  single-input classifier families (MLP, CNN, ResNet, Transformer).
-- :class:`BaseDualSpectralClassifier` - abstract base for dual-input
+- :class:`~maldideepkit.BaseSpectralClassifier`: abstract base for the
+  four single-input classifier families (MLP, CNN, ResNet, Transformer).
+- :class:`BaseDualSpectralClassifier`: abstract base for dual-input
   classifiers (e.g. spectrum + antibiotic fingerprint); the side
-  input is packed into ``X`` by concatenation to stay
-  sklearn-pipeline-friendly.
-- :class:`SpectralDataset` / :func:`make_loaders` - data utilities.
+  input is packed into ``X`` by concatenation, so they work in
+  scikit-learn pipelines.
+- :class:`SpectralDataset` / :func:`make_loaders`: data utilities.
 """
 
 from .classifier import BaseSpectralClassifier

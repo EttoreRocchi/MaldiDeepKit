@@ -35,7 +35,7 @@ class SAMOptimizer(torch.optim.Optimizer):
     Parameters
     ----------
     params : iterable
-        Parameters or param-group dicts (as for any torch optimizer).
+        Parameters or param-group dicts (as for any PyTorch optimizer).
     base_optimizer : type
         The base optimizer **class** (e.g. :class:`torch.optim.AdamW`).
         Instantiated internally against the same param groups.

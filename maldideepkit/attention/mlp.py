@@ -48,6 +48,9 @@ class SpectralAttentionMLP(nn.Module):
     last_attention : torch.Tensor or None
         Attention weights from the most recent forward pass
         (``(batch, hidden_dim)``). ``None`` when ``use_attention=False``.
+    feature_dim : int
+        Width of :meth:`forward_features` (``head_dims[-1]``, or
+        ``hidden_dim`` when ``head_dims=()``).
     """
 
     def __init__(
@@ -89,11 +92,21 @@ class SpectralAttentionMLP(nn.Module):
             prev = width
         head_layers.append(nn.Linear(prev, n_classes))
         self.head = nn.Sequential(*head_layers)
+        self.feature_dim = prev
 
         self.last_attention: torch.Tensor | None = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Map ``(batch, input_dim)`` to ``(batch, n_classes)`` logits."""
+    @property
+    def final_layer(self) -> nn.Module:
+        """Output layer mapping :meth:`forward_features` to the logits."""
+        return self.head[-1]
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(batch, input_dim)`` to ``(batch, feature_dim)`` features.
+
+        Runs everything up to (excluding) :attr:`final_layer` and updates
+        :attr:`last_attention` as a side effect.
+        """
         projected = self.proj(x)
         if self.use_attention:
             weights = self.attn(projected)
@@ -102,7 +115,13 @@ class SpectralAttentionMLP(nn.Module):
         else:
             self.last_attention = None
             gated = projected
-        return self.head(gated)
+        for layer in list(self.head)[:-1]:
+            gated = layer(gated)
+        return gated
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Map ``(batch, input_dim)`` to ``(batch, n_classes)`` logits."""
+        return self.head[-1](self.forward_features(x))
 
 
 class MaldiMLPClassifier(BaseSpectralClassifier):
@@ -121,21 +140,45 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         Dropout after the projection and first head layer.
     dropout_low : float, default=0.2
         Dropout before the output logits.
+    init_from : str, path-like, MaldiSpectrumEncoder or None, default=None
+        Self-supervised encoder (checkpoint path or fitted instance)
+        whose trunk initialises the model, with its fitted
+        preprocessing inherited; see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    freeze_trunk_epochs : int, default=0
+        Number of initial epochs training only the final layer
+        (LP-FT); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    torch_compile : bool, default=False
+        Train through ``torch.compile`` (the fitted module, checkpoints,
+        and inference stay uncompiled); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    amp_dtype : {"float16", "bfloat16", "auto"}, default="float16"
+        Autocast dtype of ``use_amp=True`` (``"bfloat16"`` cannot
+        overflow and needs no ``GradScaler``); see
+        :class:`~maldideepkit.BaseSpectralClassifier`.
+    optimizer : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    scheduler : None, str or callable, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+    callbacks : Callback, sequence of Callback or None, default=None
+        See :class:`~maldideepkit.BaseSpectralClassifier`.
+
+    Attributes
+    ----------
+    attention_weights_ : ndarray of shape (n_rows, hidden_dim) or None
+        Attention weights of every row of the last call to ``predict``,
+        ``predict_proba``, ``score``, or :meth:`get_attention_weights`;
+        after :meth:`fit`, those of the first 64 rows of ``X``. ``None``
+        when ``use_attention=False``.
 
     Notes
     -----
     Every parameter accepted by
-    :class:`~maldideepkit.base.classifier.BaseSpectralClassifier`
+    :class:`~maldideepkit.BaseSpectralClassifier`
     (e.g. ``learning_rate``, ``batch_size``, ``epochs``, ``warping``,
     ``calibrate_temperature``, ``device``, ``random_state``, ...) is
     forwarded to the base class. See its docstring for the full list.
-
-    Attributes
-    ----------
-    attention_weights_ : ndarray or None
-        Attention weights from the last :meth:`fit` or :meth:`predict`
-        forward pass. Shape ``(n_samples_last_call, hidden_dim)``. Set to
-        ``None`` when ``use_attention=False``.
 
     Examples
     --------
@@ -156,6 +199,7 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         self,
         input_dim: int | None = None,
         n_classes: int = 2,
+        *,
         hidden_dim: int = 512,
         head_dims: tuple[int, ...] = (256, 128),
         use_attention: bool = True,
@@ -165,7 +209,7 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         weight_decay: float = 0.0,
         grad_clip_norm: float | None = None,
         label_smoothing: float = 0.0,
-        loss: str = "cross_entropy",
+        loss: Any = "cross_entropy",
         focal_gamma: float = 2.0,
         use_amp: bool = False,
         swa_start_epoch: int | None = None,
@@ -195,6 +239,13 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         device: str | torch.device = "auto",
         random_state: int = 0,
         verbose: bool = False,
+        init_from: str | Path | Any | None = None,
+        freeze_trunk_epochs: int = 0,
+        torch_compile: bool = False,
+        amp_dtype: str = "float16",
+        optimizer: Any = None,
+        scheduler: Any = None,
+        callbacks: Any = None,
     ) -> None:
         super().__init__(
             input_dim=input_dim,
@@ -233,6 +284,13 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
             device=device,
             random_state=random_state,
             verbose=verbose,
+            init_from=init_from,
+            freeze_trunk_epochs=freeze_trunk_epochs,
+            torch_compile=torch_compile,
+            amp_dtype=amp_dtype,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            callbacks=callbacks,
         )
         self.hidden_dim = hidden_dim
         self.head_dims = head_dims
@@ -241,23 +299,38 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         self.dropout_low = dropout_low
         self.attention_weights_: np.ndarray | None = None
 
+    def _arch_params(self) -> dict[str, Any]:
+        return {
+            "hidden_dim": int(self.hidden_dim),
+            "head_dims": tuple(self.head_dims),
+            "use_attention": bool(self.use_attention),
+            "dropout_high": float(self.dropout_high),
+            "dropout_low": float(self.dropout_low),
+        }
+
     def _build_model(self) -> nn.Module:
         return SpectralAttentionMLP(
             input_dim=self.input_dim_,
             n_classes=self.n_classes_,
-            hidden_dim=int(self.hidden_dim),
-            head_dims=tuple(self.head_dims),
-            use_attention=bool(self.use_attention),
-            dropout_high=float(self.dropout_high),
-            dropout_low=float(self.dropout_low),
+            **self._arch_params(),
         )
 
     def _forward_logits(self, X: Any) -> np.ndarray:
-        logits = super()._forward_logits(X)
-        if self.use_attention and self.model_.last_attention is not None:
-            self.attention_weights_ = self.model_.last_attention.detach().cpu().numpy()
-        else:
-            self.attention_weights_ = None
+        check_is_fitted(self, "model_")
+        gates: list[np.ndarray] = []
+
+        def keep_gates(module: nn.Module, _inputs: Any, _output: Any) -> None:
+            if module.last_attention is not None:
+                gates.append(module.last_attention.detach().cpu().numpy())
+
+        handle = self.model_.register_forward_hook(keep_gates)
+        try:
+            logits = super()._forward_logits(X)
+        finally:
+            handle.remove()
+        self.attention_weights_ = (
+            np.concatenate(gates, axis=0) if self.use_attention and gates else None
+        )
         return logits
 
     def fit(  # type: ignore[override]
@@ -268,10 +341,27 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
         sample_weight: Any | None = None,
         warm_start: bool = False,
     ) -> MaldiMLPClassifier:
-        """Fit the model and cache attention weights from the final batch.
+        """Fit the model, then store the attention weights of the first 64 rows.
 
-        See :meth:`BaseSpectralClassifier.fit` for shared parameters,
-        including ``sample_weight`` and ``warm_start``.
+        Parameters
+        ----------
+        X : array-like or MaldiSet of shape (n_samples, n_bins)
+            Training spectra.
+        y : array-like of shape (n_samples,)
+            Class labels.
+        sample_weight : array-like of shape (n_samples,) or None, default=None
+            Per-sample weights, as in
+            :meth:`~maldideepkit.BaseSpectralClassifier.fit`.
+        warm_start : bool, default=False
+            Resume from the fitted :attr:`model_`, as in
+            :meth:`~maldideepkit.BaseSpectralClassifier.fit`.
+
+        Returns
+        -------
+        self : MaldiMLPClassifier
+            The fitted estimator, with :attr:`attention_weights_` set
+            from the first 64 rows of ``X`` (``None`` when
+            ``use_attention=False``).
         """
         super().fit(X, y, sample_weight=sample_weight, warm_start=warm_start)
         if self.use_attention:
@@ -312,18 +402,3 @@ class MaldiMLPClassifier(BaseSpectralClassifier):
                 "ensure the model was built with use_attention=True."
             )
         return self.attention_weights_
-
-    @classmethod
-    def from_spectrum(
-        cls, bin_width: int, input_dim: int, **overrides
-    ) -> "MaldiMLPClassifier":
-        """Construct a classifier for a given ``(bin_width, input_dim)`` layout.
-
-        The MLP is architecturally scale-agnostic, so this factory
-        only forwards ``input_dim`` and any ``**overrides``. Provided
-        for API symmetry with the other classifiers.
-        """
-        del bin_width
-        kwargs: dict[str, Any] = {"input_dim": input_dim}
-        kwargs.update(overrides)
-        return cls(**kwargs)

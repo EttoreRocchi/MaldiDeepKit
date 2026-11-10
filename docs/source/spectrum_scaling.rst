@@ -9,10 +9,11 @@ default layout: ``bin_width = 3`` over the 2000-20000 Da range, giving
 - the user **trims** the spectrum to a narrower m/z range, shrinking
   ``input_dim`` independently of ``bin_width``.
 
-These two axes affect different architectural concerns, so MaldiDeepKit
-scales each knob with whichever quantity it actually depends on. This
-page documents that semantic split and the :meth:`from_spectrum`
-factory that applies it.
+These two axes affect different parts of the architectures, so
+MaldiDeepKit scales each parameter with the quantity it depends on.
+This page describes that split and the
+:meth:`~maldideepkit.BaseSpectralClassifier.from_spectrum` factory that
+applies it.
 
 Why the defaults look the way they do
 -------------------------------------
@@ -25,18 +26,17 @@ Default conv-kernel width (CNN first layer, ResNet stem) and patch size
   collapsing distinct local patterns into a single value.
 - **Global feature integration.** Keeping the kernel / patch small
   leaves enough depth (for conv stacks) or token-sequence length (for
-  attention and SSM) for deeper components to integrate long-range
-  structure.
+  attention) for deeper components to integrate long-range structure.
 
 The specific reference values (``kernel_size=7``, ``patch_size=4``) are
 inherited from well-tested image-domain defaults (ResNet-18 stem,
 ViT patch).
 
-Empirically, these values also align cleanly with the **peak width
-distribution** on DRIAMS spectra at ``bin_width=3``. We measured the
-full width at half maximum (FWHM) of all detected peaks on 50 random
-spectra per species-drug pair (``scipy.signal.find_peaks`` with
-prominence threshold, ``scipy.signal.peak_widths`` at ``rel_height=0.5``):
+These values also match the **peak width distribution** of DRIAMS
+spectra at ``bin_width=3``. The table gives the full width at half
+maximum (FWHM) of all peaks detected on 50 random spectra per
+species-drug pair (``scipy.signal.find_peaks`` with a prominence
+threshold, ``scipy.signal.peak_widths`` at ``rel_height=0.5``):
 
 .. list-table:: Peak FWHM on DRIAMS (Da, ``bin_width=3``)
    :header-rows: 1
@@ -71,34 +71,33 @@ prominence threshold, ``scipy.signal.peak_widths`` at ``rel_height=0.5``):
      - 15.2
      - **21.1**
 
-The distribution is strikingly consistent across the three species: the
-median peak is **~12 Da** wide and the 90th-percentile peak is **~21 Da**.
-This is *why* the image-domain defaults happen to be a natural fit:
+The distribution is the same for the three species: the median peak
+is **~12 Da** wide and the 90th-percentile peak **~21 Da**, which is
+why the image-domain defaults fit:
 
 - ``patch_size=4`` (12 Da at ``bin_width=3``) ≈ one median peak per
-  token, so each Transformer token captures roughly one peak's worth
-  of shape.
+  token, so each Transformer token holds about one peak.
 - ``kernel_size=7`` (21 Da) ≈ 90th-percentile peak FWHM, so the first
   CNN / ResNet conv fully contains ~90% of peaks along with one or two
   bins of shoulder on either side.
 
-This is **empirical observation, not a priori design**. The defaults
-were picked for the local-vs-global balance first; the alignment with
-DRIAMS peak widths emerged from the measurement above. Different
-instruments, different preprocessing, or different bin widths will
-shift the distribution (use :meth:`from_spectrum` to scale).
+This match was **observed, not designed**: the defaults were chosen
+for the local vs global balance, and the measurement above came later.
+Other instruments, preprocessing, or bin widths shift the distribution
+(use :meth:`~maldideepkit.BaseSpectralClassifier.from_spectrum` to
+scale).
 
 The semantic split
 ------------------
 
-When the spectrum layout changes, each architectural knob is driven
-by the quantity it physically depends on:
+When the spectrum layout changes, each architectural parameter
+follows the quantity it physically depends on:
 
 .. list-table::
    :header-rows: 1
    :widths: 28 26 46
 
-   * - Knob
+   * - Parameter
      - Driven by
      - Why
    * - CNN ``kernel_size``
@@ -119,15 +118,15 @@ by the quantity it physically depends on:
        ``input_dim`` works with the default ``patch_size=4`` without
        tuning. ``from_spectrum`` just forwards ``input_dim``.
 
-The MLP has no spectral-layout-dependent knob either: its first layer
+The MLP has no spectral-layout-dependent parameter either: its first layer
 is a single ``Linear(input_dim, hidden_dim)`` that handles any input
 size identically.
 
 Auto-scaling: ``from_spectrum``
 -------------------------------
 
-Each classifier exposes a ``from_spectrum`` classmethod that applies
-the semantic split automatically:
+The four architectures and the dual-branch classifier expose a
+``from_spectrum`` classmethod that applies this split automatically:
 
 .. code-block:: python
 
@@ -141,6 +140,9 @@ relevant one internally:
 - ``MaldiTransformerClassifier`` and ``MaldiMLPClassifier`` are
   architecturally scale-agnostic and just record ``input_dim`` for
   shape validation; ``from_spectrum`` forwards overrides untouched.
+- ``MaldiDualBranchClassifier`` sets ``n_spec_bins`` to ``input_dim``
+  and scales a ``backbone`` given by name with the ``from_spectrum`` of
+  its class.
 
 Any keyword in ``**overrides`` wins over the auto-scaled default.
 
@@ -174,16 +176,14 @@ Any keyword in ``**overrides`` wins over the auto-scaled default.
        bin_width=3, input_dim=6000, kernel_size=(11, 7, 5, 3),
    )
 
-Scaling helpers
----------------
+Scaling helper
+--------------
 
-The underlying helper is public and lives under
-``maldideepkit._bin_scaling``:
-
-- :func:`maldideepkit._bin_scaling.scale_odd_kernel` returns an odd
-  kernel size closest to ``reference_kernel * reference_bin_width /
-  bin_width``, clamped ``>= 3``. Reference: kernel 7 at
-  ``bin_width=3``. Used by CNN and ResNet kernels.
+The CNN and ResNet kernels are scaled by an internal helper,
+``scale_odd_kernel`` in the private module
+``maldideepkit._bin_scaling``. It returns the odd kernel size closest
+to ``reference_kernel * reference_bin_width / bin_width``, clamped
+``>= 3``, with kernel 7 at ``bin_width=3`` as the reference.
 
 The Transformer's ``patch_size`` is deliberately *not* scaled by
 layout: a learned positional embedding sizes itself to whatever token
@@ -193,8 +193,8 @@ across bin widths and trimmed m/z ranges.
 Per-block configurability
 -------------------------
 
-For reviewer-driven ablations, :class:`~maldideepkit.MaldiCNNClassifier`
-accepts a scalar *or* a per-block tuple for both ``kernel_size`` and
+For ablations, :class:`~maldideepkit.MaldiCNNClassifier` accepts a
+scalar *or* a per-block tuple for both ``kernel_size`` and
 ``pool_size``:
 
 .. code-block:: python
@@ -211,11 +211,11 @@ accepts a scalar *or* a per-block tuple for both ``kernel_size`` and
 
 :class:`~maldideepkit.MaldiResNetClassifier` exposes
 ``stem_kernel_size``, ``stem_stride``, ``block_kernel_size``, and
-``use_stem_pool`` as explicit keyword arguments. Defaults are
+``use_stem_pool`` as parameters. Defaults are
 peak-friendly for MALDI-TOF (``stem_stride=1``, ``block_kernel_size=7``,
 ``use_stem_pool=False``) and deviate from the literal ResNet-18
 backbone. To reproduce the literal configuration, set
-``stem_stride=2``, ``block_kernel_size=3``, ``use_stem_pool=True``.
+``stem_stride=2``, ``block_kernel_size=3``, and ``use_stem_pool=True``.
 
 Input-dim sensitivity of the flat dense head
 --------------------------------------------

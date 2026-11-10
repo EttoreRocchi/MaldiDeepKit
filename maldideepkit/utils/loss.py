@@ -1,4 +1,4 @@
-"""Loss functions used by :class:`BaseSpectralClassifier`."""
+"""Loss functions used by :class:`~maldideepkit.BaseSpectralClassifier`."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def _gather_cw_per_sample(
     (one-hot blended by MixUp / CutMix) returns ``sum_c t_c * w_c``.
 
     Used as the denominator in :func:`_weighted_loss_reduce` so that the
-    sklearn convention "doubling ``sample_weight`` is equivalent to
+    scikit-learn convention "doubling ``sample_weight`` is equivalent to
     duplicating the row" composes correctly with ``class_weight``.
 
     Returns ``None`` when ``class_weight`` is ``None``.
@@ -46,7 +46,8 @@ def _weighted_loss_reduce(
       ``per_sample.sum() / cw_per_sample.sum()`` (matches PyTorch's
       class-weighted mean reduction).
     - ``sample_weight`` given, ``cw_per_sample=None``:
-      ``(sw * l).sum() / sw.sum()`` (sklearn ``sample_weight`` semantics).
+      ``(sw * l).sum() / sw.sum()`` (scikit-learn ``sample_weight``
+      semantics).
     - both given: ``(sw * l).sum() / (sw * cw).sum()`` (sklearn-compatible
       composition: doubling a sample's weight is equivalent to duplicating
       the row).
@@ -68,8 +69,8 @@ def _weighted_loss_reduce(
         if sample_weight is not None:
             raise ValueError(
                 "sample_weight requires a per-sample loss vector, but the "
-                "criterion returned a scalar - build it with "
-                "reduction='none' (e.g. nn.CrossEntropyLoss("
+                "criterion returned a scalar (build it with "
+                "reduction='none', e.g. nn.CrossEntropyLoss("
                 "reduction='none'))."
             )
         return per_sample
@@ -105,16 +106,21 @@ class FocalLoss(nn.Module):
     weight : torch.Tensor or None, default=None
         Per-class weight tensor of shape ``(n_classes,)``. Applied to
         every sample by gathering at its target index (matches the
-        :class:`CrossEntropyLoss` convention for ``weight``).
+        :class:`~torch.nn.CrossEntropyLoss` convention for ``weight``).
     gamma : float, default=2.0
         Focusing parameter. ``0`` degrades to cross-entropy; ``2`` is
-        the value used in Lin et al. 2017.
+        the value used by Lin et al. (2017).
     label_smoothing : float, default=0.0
         Target smoothing in ``[0, 1)``. At ``0.0`` the target is a
         one-hot vector; otherwise the target distribution becomes
         ``(1 - eps) * one_hot + eps / n_classes``.
     reduction : {"mean", "sum", "none"}, default="mean"
         How to reduce the per-sample loss tensor.
+
+    Attributes
+    ----------
+    weight : torch.Tensor or None
+        The class weights given as ``weight`` (read-only).
     """
 
     def __init__(
@@ -143,6 +149,11 @@ class FocalLoss(nn.Module):
         self.gamma = float(gamma)
         self.label_smoothing = float(label_smoothing)
         self.reduction = reduction
+
+    @property
+    def weight(self) -> torch.Tensor | None:
+        """Return the class weights (the ``weight`` argument of the constructor)."""
+        return self.class_weight
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         r"""Compute focal loss for ``(N, C)`` logits.

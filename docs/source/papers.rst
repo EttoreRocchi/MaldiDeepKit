@@ -1,14 +1,11 @@
-Citation & References
-=====================
+Citation and references
+=======================
 
-If you use MaldiDeepKit in academic work, please cite this repository
-until the companion paper is available:
+MaldiDeepKit is part of MaldiSuite, which is described in an Application
+Note currently under review at *Bioinformatics*. The full citation will be
+added here once the article is published.
 
-   *Citation will be available soon.* A companion benchmark paper
-   comparing the four MaldiDeepKit architectures on DRIAMS-derived
-   subsets is in preparation.
-
-Alongside the upstream references for the architectures bundled in
+Please also cite the upstream references for the architectures bundled in
 the package:
 
 - **ResNet** - He K, Zhang X, Ren S, Sun J (2016). *Deep Residual
