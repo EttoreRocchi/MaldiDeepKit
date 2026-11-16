@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help install install-docs lint format format-check pre-commit \
-        test test-cov docs docs-clean docs-serve clean publish publish-test
+        test test-cov docs docs-clean docs-serve notebooks clean publish publish-test
 
 # Colours
 BOLD  := \033[1m
@@ -57,6 +57,9 @@ docs-clean:  ## Remove Sphinx build artefacts
 
 docs-serve:  ## Serve built docs locally on http://localhost:8080
 	@python -m http.server --directory docs/build/html 8080
+
+notebooks:  ## Re-run the tutorial notebooks in place (downloads the demo data once)
+	@jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 notebooks/[0-9]*.ipynb
 
 # Housekeeping
 

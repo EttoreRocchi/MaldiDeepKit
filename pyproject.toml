@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "MaldiDeepKit"
 dynamic = ["version", "dependencies", "optional-dependencies"]
-description = "A catalog of sklearn-compatible deep learning classifiers for MALDI-TOF binned spectra"
+description = "Deep-learning classifiers for binned MALDI-TOF spectra"
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [
   { name = "Ettore Rocchi", email = "ettore.rocchi3@unibo.it" }

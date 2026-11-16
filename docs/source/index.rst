@@ -15,14 +15,14 @@
 MaldiDeepKit documentation
 ==========================
 
-A catalogue of sklearn-compatible deep learning classifiers for MALDI-TOF
-mass spectrometry: four PyTorch backbones (MLP with optional
-sigmoid-gated attention, 1-D CNN, 1-D ResNet, and 1-D Vision
-Transformer), a dual-branch classifier for a spectrum plus side
-features, a self-training classifier for partly labelled data, and a
-self-supervised encoder that pre-trains the backbones on unlabelled
-spectra. All of them share one estimator API, with defaults set for
-~6000-bin MALDI-TOF spectra.
+Deep-learning classifiers for binned MALDI-TOF spectra: four PyTorch
+backbones (MLP with optional sigmoid-gated attention, 1-D CNN, 1-D
+ResNet, and 1-D Vision Transformer), a dual-branch classifier for a
+spectrum plus side features, a self-training classifier for partly
+labelled data, and a self-supervised encoder that pre-trains the
+backbones on unlabelled spectra. All of them share one scikit-learn
+compatible estimator API, with defaults set for ~6000-bin MALDI-TOF
+spectra.
 
 .. container:: sd-d-flex-row sd-flex-justify-content-center sd-gap-2 sd-mb-4
 

@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <strong>A catalogue of sklearn-compatible deep learning classifiers for MALDI-TOF binned spectra</strong>
+  <strong>Deep-learning classifiers for binned MALDI-TOF spectra</strong>
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
   <a href="#tutorials">Tutorials</a> •
   <a href="#maldisuite-ecosystem">MaldiSuite</a> •
   <a href="#contributing">Contributing</a> •
-  <a href="#citing">Citing</a> •
+  <a href="#citation">Citation</a> •
   <a href="#license">License</a>
 </p>
 
@@ -89,7 +89,7 @@ See [`CONTRIBUTING.md`](https://github.com/EttoreRocchi/MaldiDeepKit/blob/main/C
   - `MaldiResNetClassifier` - 1-D ResNet-18-style residual blocks for a deeper convolutional backbone.
   - `MaldiTransformerClassifier` - 1-D Vision Transformer with global self-attention, pre-norm, LayerScale, and stochastic depth.
 - **MALDI-TOF defaults**: kernel sizes, depths, patch widths, and warmup / cosine-annealing schedules are tuned for 6000-bin spectra in the 2000-20000 Da range.
-- **Auto-scaling for non-default layouts**: the four architectures and the dual-branch classifier have a `from_spectrum(bin_width, input_dim, **overrides)` factory, which sets `input_dim` and scales the conv kernels of the CNN and the ResNet to the bin width. See the [Spectrum scaling guide](https://maldideepkit.readthedocs.io/en/latest/spectrum_scaling.html).
+- **Auto-scaling for non-default layouts**: the four architectures and the dual-branch classifier have a `from_spectrum(bin_width, input_dim, **overrides)` factory, which sets `input_dim` and scales the conv kernels of the CNN and the ResNet to the bin width. See the [Spectrum scaling guide](https://maldideepkit.readthedocs.io/en/stable/spectrum_scaling.html).
 - **Training recipes**: AdamW when `weight_decay > 0`, gradient clipping, linear warmup and cosine annealing, focal loss, label smoothing, mixed precision (AMP), Stochastic Weight Averaging, Sharpness-Aware Minimization, post-hoc threshold tuning, and temperature scaling, all set through classifier parameters.
 - **Leak-safe spectral warping**: pass any sklearn-style transformer (such as [`maldiamrkit.alignment.Warping`](https://github.com/EttoreRocchi/MaldiAMRKit)) as `warping=`; it is fitted on the training split only, then applied to both splits during training and to new spectra at `predict` time, *before* per-feature standardisation.
 - **MaldiSet integration**: pass a `maldiamrkit.MaldiSet` directly to `fit` / `predict`; MaldiDeepKit reads its DataFrame-like `.X` attribute.
@@ -180,7 +180,7 @@ cnn_coarse = MaldiCNNClassifier.from_spectrum(bin_width=6, input_dim=3000)
 tr = MaldiTransformerClassifier.from_spectrum(bin_width=1, input_dim=18000)
 ```
 
-See the [Spectrum scaling guide](https://maldideepkit.readthedocs.io/en/latest/spectrum_scaling.html) for how each parameter is scaled.
+See the [Spectrum scaling guide](https://maldideepkit.readthedocs.io/en/stable/spectrum_scaling.html) for how each parameter is scaled.
 
 ### Save and load
 
@@ -190,7 +190,7 @@ clf.save("my_model")
 restored = MaldiCNNClassifier.load("my_model")
 ```
 
-For more examples covering training recipes, calibration, and attention inspection, see the [Quickstart guide](https://maldideepkit.readthedocs.io/en/latest/quickstart.html) and, for ensembles, the [API reference](https://maldideepkit.readthedocs.io/en/latest/api/index.html).
+For more examples covering training recipes, calibration, and attention inspection, see the [Quickstart guide](https://maldideepkit.readthedocs.io/en/stable/quickstart.html) and, for ensembles, the [API reference](https://maldideepkit.readthedocs.io/en/stable/api/index.html).
 
 ## Algorithms
 
@@ -288,7 +288,7 @@ print(lpft.trunk_unfroze_, lpft.best_epoch_phase_)  # unfreeze reached? phase of
 - **GPU throughput**: `data_device="auto"` keeps the pool on the GPU when it fits, and `torch_compile=True` compiles the model for `fit`.
 - **Custom backbones**: a `BaseSpectralClassifier` subclass works wherever a built-in one does, and `register_backbone` gives it a name.
 
-See the [Pre-training API reference](https://maldideepkit.readthedocs.io/en/latest/api/pretraining.html) for the details of each point, a custom pre-text example, the auxiliary head, and the checkpoint format.
+See the [Pre-training API reference](https://maldideepkit.readthedocs.io/en/stable/api/pretraining.html) for the details of each point, a custom pre-text example, the auxiliary head, and the checkpoint format.
 
 ## Choosing the training components
 
@@ -360,11 +360,11 @@ MaldiDeepKit needs Python 3.10 or newer and PyTorch 2.3 or newer (full list in [
 
 Pull requests, bug reports, and feature ideas are welcome. See the [Contributing Guide](https://github.com/EttoreRocchi/MaldiDeepKit/blob/main/CONTRIBUTING.md) for how to get started.
 
-## Citing
+## Citation
 
 MaldiDeepKit is part of MaldiSuite, which is described in an Application Note currently under review at *Bioinformatics*. The full citation will be added here once the article is published.
 
-See the [full publications list](https://maldideepkit.readthedocs.io/en/latest/papers.html) for more papers using the MaldiSuite.
+Publications using MaldiSuite are listed on the [MaldiSuite website](https://ettorerocchi.github.io/MaldiSuite/#research).
 
 ## License
 
